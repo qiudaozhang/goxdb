@@ -2,8 +2,8 @@
 
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
-> 当前进度：**M0 地基**、**M1 类型化查询构建器**、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
-> 多表写操作、INSERT…SELECT）均已完成。整体设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
+> 当前进度：**M0** 地基、**M1** 查询构建器、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
+> 多表写、INSERT…SELECT）已完成；**M3** 已支持窗口函数与软删除。设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 安装
 
@@ -266,6 +266,53 @@ type User struct {
 插入时只填充零值字段（显式赋值优先）；`UpdateModel` 会把 `updated_at` 刷新为当前时间并回写模型，
 且不会修改 `created_at`。需要写入特定时间就用 `Update[T]().Set(U.UpdatedAt.To(t))`。
 时钟可用 `xdb.WithClock(fn)` 注入，便于测试。
+
+### 窗口函数
+
+```go
+w := xdb.Win().PartitionBy(O.CustomerID).OrderBy(O.Amount.Desc())
+
+// 排名
+rows, err := xdb.Select[RankedOrder](db,
+	O.ID, O.Amount,
+	xdb.RowNumber().Over(w).As("rn"),
+).From(O).All(ctx)
+
+// 累计求和需要显式框架
+runW := xdb.Win().PartitionBy(O.CustomerID).OrderBy(O.ID.Asc()).
+	Frame("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW")
+running, err := xdb.Select[RankedOrder](db,
+	xdb.SumOver[int64](O.Amount).Over(runW).As("running"),
+).From(O).All(ctx)
+
+// 过滤窗口结果必须用派生表（SQL 求值顺序所限）
+inner := xdb.Select[RankedOrder](nil, O.CustomerID, O.Amount,
+	xdb.RowNumber().Over(w).As("rn")).From(O)
+d := xdb.Derived("r", inner)
+top, err := xdb.Select[RankedOrder](db, d.Star()).From(d).Where(xdb.C[int64](d, "rn").Eq(1)).All(ctx)
+```
+
+可用：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead /
+FirstValue / LastValue / NthValue`，窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。
+
+### 软删除
+
+```go
+type Post struct {
+	ID        int64      `xdb:"id,pk,auto"`
+	Title     string     `xdb:"title"`
+	DeletedAt *time.Time `xdb:"deleted_at,softDelete"`
+}
+
+xdb.Query[Post](db).All(ctx)                  // 自动附加 deleted_at IS NULL
+xdb.Query[Post](db).Unscoped().All(ctx)       // 也能看到已删除的行
+
+xdb.Delete[Post](db).Where(P.ID.Eq(1)).Exec(ctx)          // → UPDATE ... SET deleted_at = CURRENT_TIMESTAMP
+xdb.Delete[Post](db).Unscoped().Where(P.ID.Eq(1)).Exec(ctx) // → 真正物理删除
+```
+
+软删除过滤对子查询同样生效。它由**源表**推导，所以 `xdb.Select[int64](nil, P.ID).From(P)` 也会过滤；
+手写的 `xdb.T("posts")` 不含模型信息，不会自动过滤。
 
 ## 错误处理
 

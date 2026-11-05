@@ -77,6 +77,12 @@ type valNode struct{ v any }
 
 func (n valNode) build(b *builder) { b.arg(n.v) }
 
+// nowNode 渲染为当前时间函数。MySQL 与 PostgreSQL 都支持 CURRENT_TIMESTAMP，
+// 因此这里不需要方言分支（保持为节点以便将来扩展）。
+type nowNode struct{}
+
+func (nowNode) build(b *builder) { b.write("CURRENT_TIMESTAMP") }
+
 // rawNode 是原样输出的 SQL 文本（仅框架内部使用固定文本）。
 type rawNode string
 

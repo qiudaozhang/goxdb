@@ -11,12 +11,16 @@ type Source interface {
 	// qualifier 返回用于限定列名的名字（别名优先）。
 	qualifier() string
 	buildFrom(b *builder)
+	// sourceModel 返回数据源对应的模型元数据；派生表与手写表名为 nil。
+	// 通过内嵌 Table 的自定义表结构（代码生成产物）会自动转发此方法。
+	sourceModel() *schema.Model
 }
 
 // Table 是一张表（可带别名）。值类型，As 返回新值，不影响原表。
 type Table struct {
 	name  string
 	alias string
+	model *schema.Model // TableOf 构造时记录，用于推导软删除等模型级行为
 }
 
 // T 按表名构造表。
@@ -29,7 +33,7 @@ func TableOf[M any]() Table {
 	if err != nil {
 		panic(err)
 	}
-	return Table{name: m.Table}
+	return Table{name: m.Table, model: m}
 }
 
 // As 返回带别名的表，用于自连接或简化书写。
@@ -43,6 +47,8 @@ func (t Table) Alias() string { return t.alias }
 
 // Star 返回该表的全部列：表名.*。
 func (t Table) Star() Node { return starNode{t.qualifier()} }
+
+func (t Table) sourceModel() *schema.Model { return t.model }
 
 func (t Table) qualifier() string {
 	if t.alias != "" {
@@ -83,6 +89,8 @@ func Derived(alias string, q Node) DerivedTable { return DerivedTable{q: q, alia
 
 func (d DerivedTable) qualifier() string { return d.alias }
 
+func (d DerivedTable) sourceModel() *schema.Model { return nil }
+
 func (d DerivedTable) buildFrom(b *builder) {
 	b.node(d.q)
 	b.write(" AS ")
@@ -107,9 +115,10 @@ func CTE(name string, q Node) CTETable { return CTETable{name: name, q: q} }
 // Columns 指定 CTE 的列名列表：name (c1, c2) AS (...)。
 func (c CTETable) Columns(cols ...string) CTETable { c.cols = cols; return c }
 
-func (c CTETable) qualifier() string    { return c.name }
-func (c CTETable) buildFrom(b *builder) { b.ident(c.name) }
-func (c CTETable) Star() Node           { return starNode{c.name} }
+func (c CTETable) qualifier() string          { return c.name }
+func (c CTETable) sourceModel() *schema.Model { return nil }
+func (c CTETable) buildFrom(b *builder)       { b.ident(c.name) }
+func (c CTETable) Star() Node                 { return starNode{c.name} }
 func (c CTETable) buildDef(b *builder) {
 	b.ident(c.name)
 	if len(c.cols) > 0 {

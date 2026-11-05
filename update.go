@@ -283,12 +283,15 @@ func (q *UpdateQ[T]) now() time.Time {
 
 // DeleteQ 是 DELETE 语句，不可变。
 type DeleteQ[T any] struct {
-	ex      Executor
-	table   Table
-	joins   []joinClause
-	where   []Cond
-	allRows bool
-	err     error
+	ex    Executor
+	table Table
+	joins []joinClause
+	where []Cond
+	// softDelete 是模型的软删除列；非 nil 时 Delete 渲染为 UPDATE 该列。
+	softDelete *schema.Field
+	unscoped   bool
+	allRows    bool
+	err        error
 }
 
 // Delete 构造针对模型 T 对应表的 DELETE。
@@ -300,8 +303,12 @@ func Delete[T any](ex Executor) *DeleteQ[T] {
 		return q
 	}
 	q.table = Table{name: m.Table}
+	q.softDelete = m.SoftDelete
 	return q
 }
+
+// Unscoped 让删除真正物理删除，即使模型声明了 softDelete 列。
+func (q *DeleteQ[T]) Unscoped() *DeleteQ[T] { c := q.clone(); c.unscoped = true; return c }
 
 // DeleteModel 按主键删除模型。
 func DeleteModel[T any](ex Executor, v *T) *DeleteQ[T] {
@@ -358,6 +365,20 @@ func (q *DeleteQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 		return "", nil, ErrMissingWhere
 	}
 	b := newBuilder(d)
+	// 软删除：DELETE 改写为 UPDATE ... SET <col> = CURRENT_TIMESTAMP。
+	if q.softDelete != nil && !q.unscoped {
+		b.write("UPDATE ")
+		q.table.buildFrom(b)
+		b.write(" SET ")
+		b.ident(q.softDelete.Column)
+		b.write(" = ")
+		b.node(nowNode{})
+		if !where.IsZero() {
+			b.write(" WHERE ")
+			where.build(b)
+		}
+		return b.result()
+	}
 	var extra []Cond
 	if len(q.joins) == 0 {
 		b.write("DELETE FROM ")

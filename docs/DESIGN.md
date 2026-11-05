@@ -588,6 +588,12 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 - **锁与调试**：`ForUpdate / ForShare / NoWait / SkipLocked`（非事务内使用报 `ErrLockOutsideTx`），`ToSQL()`。
 - 所有构建器不可变：每个方法返回新对象，可放心复用基础查询。
 
+### M3（进行中）
+
+- **窗口函数**：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead / FirstValue / LastValue / NthValue`，以及窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。窗口用 `xdb.Win().PartitionBy(...).OrderBy(...).Frame(...)` 描述；框架语法在 MySQL 8 与 PostgreSQL 之间一致，故不作方言翻译。窗口函数只能出现在投影与 ORDER BY 中，过滤需用派生表包一层（测试里覆盖了「每个客户金额最大的订单」这一典型写法）。
+- **软删除**：字段加 `xdb:"deleted_at,softDelete"` 后，`Query / Select / 子查询`自动附加 `<col> IS NULL`，`Delete` 渲染为 `UPDATE ... SET <col> = CURRENT_TIMESTAMP`。`Unscoped()` 用于绕过过滤（查询）或真正物理删除（删除）。软删除列属于**源表**，因此从 `from` 的模型推导而非结果类型——`xdb.Select[int64](nil, P.ID).From(P)` 也能正确过滤；手写的 `xdb.T("posts")` 没有模型信息，不会自动过滤（行为显式）。
+- 待完成：读写分离、方言扩展包（JSON / 数组）、pgx 原生连接、DB-first 反向生成模型。
+
 ### M2（已完成）
 
 - **代码生成 `goxdb gen`**：`go run github.com/qiudaozhang/goxdb/cmd/goxdb -dir ./model` 扫描带 `xdb` 标签的结构体，生成类型化的表与列描述符（`var U = struct{ xdb.Table; ID xdb.NumberCol[int64]; ... }`）。列类型由 Go 字段类型决定，`U.Age.Eq("abc")` 编译失败。`TableName()` 的值优先于 snake_case 复数推导；没有 `xdb` 标签的结构体（DTO）不生成。描述符变量名取类型名的大写字母（`User` → `U`），与类型名冲突时回退为 `<Type>Table`。

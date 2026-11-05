@@ -60,6 +60,9 @@ type Model struct {
 	// 由框架在写入时填充（必须在写入前可 settable）。
 	CreateTime *Field
 	UpdateTime *Field
+	// SoftDelete 是带 softDelete 选项的字段（通常是 *time.Time 或 sql.Null[time.Time]），
+	// 查询时自动附加 "IS NULL"，Delete 改为更新该列。
+	SoftDelete *Field
 	// Relations 是按字段名索引的关联定义。
 	Relations map[string]*Relation
 	byName    map[string]*Field
@@ -165,6 +168,12 @@ func parse(t reflect.Type) (*Model, error) {
 				return nil, fmt.Errorf("goxdb: %s has more than one autoCreateTime field (%s, %s)", t, m.CreateTime.GoName, f.GoName)
 			}
 			m.CreateTime = f
+		}
+		if f.Has("softDelete") {
+			if m.SoftDelete != nil {
+				return nil, fmt.Errorf("goxdb: %s has more than one softDelete field (%s, %s)", t, m.SoftDelete.GoName, f.GoName)
+			}
+			m.SoftDelete = f
 		}
 		if f.Has("autoUpdateTime") {
 			if err := checkAutoTime(t, f, "autoUpdateTime"); err != nil {

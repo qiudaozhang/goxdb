@@ -25,6 +25,10 @@ type Q[T any] struct {
 	ex       Executor
 	c        selectCore
 	preloads []preloadSpec
+	// softDelete 是模型的软删除列（无则 nil）。
+	softDelete *schema.Field
+	// unscoped 为 true 时不再自动附加软删除过滤。
+	unscoped bool
 	lenient  bool
 	err      error
 }
@@ -60,6 +64,8 @@ type selectCore struct {
 	limit     int64 // <0 表示无
 	offset    int64
 	lock      lockClause
+	// softDelete 不为空时，在 WHERE 中附加 "<col> IS NULL"。
+	softDelete *schema.Field
 }
 
 // Query 构造以模型 T 为结果、以 T 对应的表为数据源的查询，选择列表为模型的全部列。
@@ -72,8 +78,9 @@ func Query[T any](ex Executor) *Q[T] {
 		q.err = err
 		return q
 	}
-	tbl := Table{name: m.Table}
+	tbl := Table{name: m.Table, model: m}
 	q.c.from = tbl
+	q.softDelete = m.SoftDelete
 	for _, f := range m.Fields {
 		q.c.cols = append(q.c.cols, colNode{src: tbl, name: f.Column})
 	}
@@ -209,6 +216,27 @@ func (q *Q[T]) NoWait() *Q[T] { c := q.clone(); c.c.lock.wait = "NOWAIT"; return
 // SkipLocked 跳过已被锁定的行，常用于任务队列，需配合 ForUpdate / ForShare。
 func (q *Q[T]) SkipLocked() *Q[T] { c := q.clone(); c.c.lock.wait = "SKIP LOCKED"; return c }
 
+// softDeleteField 返回数据源的软删除列（没有则 nil）。
+//
+// 关键点：软删除列属于**源表**，而不是结果类型 T。因此不能只看 T——
+// 例如 xdb.Select[int64](nil, P.ID).From(P) 的结果类型是 int64，
+// 但软删除过滤必须来自 posts 表。只有 from 是 TableOf[M] 构造的表时才能推导；
+// 手写的 xdb.T("posts") 没有模型信息，因此不会自动过滤（行为显式、可预期）。
+func (q *Q[T]) softDeleteField() *schema.Field {
+	if q.c.from == nil {
+		return nil
+	}
+	if m := q.c.from.sourceModel(); m != nil {
+		return m.SoftDelete
+	}
+	return nil
+}
+
+// Unscoped 关闭软删除过滤，让查询能看到（并操作到）已软删除的行。
+//
+//	xdb.Query[User](db).Unscoped().Where(U.ID.Eq(1)).One(ctx) // 也能查到已删除的行
+func (q *Q[T]) Unscoped() *Q[T] { c := q.clone(); c.unscoped = true; return c }
+
 // Lenient 返回宽松模式的查询：结果列找不到对应字段时忽略而非报错。
 func (q *Q[T]) Lenient() *Q[T] { c := q.clone(); c.lenient = true; return c }
 
@@ -299,8 +327,12 @@ func (q *Q[T]) SQL(d dialect.Dialect) (string, []any, error) {
 	if q.err != nil {
 		return "", nil, q.err
 	}
+	core := q.c
+	if core.from != nil && !q.unscoped {
+		core.softDelete = q.softDeleteField()
+	}
 	b := newBuilder(d)
-	q.c.buildSelect(b)
+	core.buildSelect(b)
 	return b.result()
 }
 
@@ -323,8 +355,12 @@ func (q *Q[T]) build(b *builder) {
 		b.fail(q.err)
 		return
 	}
+	core := q.c
+	if core.from != nil && !q.unscoped {
+		core.softDelete = q.softDeleteField()
+	}
 	b.write("(")
-	q.c.buildSelect(b)
+	core.buildSelect(b)
 	b.write(")")
 }
 
@@ -334,7 +370,11 @@ func (q *Q[T]) buildSelectBody(b *builder) {
 		b.fail(q.err)
 		return
 	}
-	q.c.buildSelect(b)
+	core := q.c
+	if core.from != nil && !q.unscoped {
+		core.softDelete = q.softDeleteField()
+	}
+	core.buildSelect(b)
 }
 
 func (q *Q[T]) exprType() T { var z T; return z }
@@ -416,7 +456,12 @@ func (c *selectCore) buildCore(b *builder) {
 			j.on.build(b)
 		}
 	}
-	if w := And(c.where...); !w.IsZero() {
+	conds := c.where
+	if c.softDelete != nil {
+		col := colNode{src: c.from, name: c.softDelete.Column}
+		conds = append([]Cond{wrap[bool](postfixNode{col, "IS NULL"})}, conds...)
+	}
+	if w := And(conds...); !w.IsZero() {
 		b.write(" WHERE ")
 		w.build(b)
 	}
