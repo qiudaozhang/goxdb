@@ -579,7 +579,23 @@ type Hook interface {
 
 DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归一化 / 托管事务、savepoint、重试、回调、状态机、误用检测 / 手动事务 / MySQL 与 PostgreSQL 方言。
 
+### M1 构建器（已完成）
+
+- **列**：`Col[T]` / `NumberCol[T]` / `StringCol` / `TimeCol`，`xdb.T` + `xdb.C[...]` 的免生成退路可用。
+- **查询**：`Query[T]` / `Select[T]`，`Where / Or / And / Not / If`，`Join / LeftJoin / RightJoin / CrossJoin`，`GroupBy / Having`，`Distinct`，`OrderBy / Limit / Offset / Page`，`Union / UnionAll`，`With / WithRecursive`。
+- **表达式**：`In / NotIn / InSub / NotInSub / Between / IsNull / Like / ILike / HasPrefix·HasSuffix·Contains`，聚合 `Count / CountOf / CountDistinct / Sum / Avg / Min / Max`，`Coalesce / Lower / Upper / Add / Subtract / Multiply / Divide / Func / Cast / SQL`，`Exists / NotExists / Scalar`，`Derived` / `CTE`。
+- **写入**：`Insert / InsertMany`（批量分批、自增回填、`Batch` / `Columns` / `Omit`），upsert `OnConflict(...).DoUpdate / DoUpdateSet / DoNothing`（含 `Excluded`），`Update / UpdateModel / Delete / DeleteModel`（`ErrMissingWhere` 护栏、`AllRows` 显式放行）。
+- **锁与调试**：`ForUpdate / ForShare / NoWait / SkipLocked`（非事务内使用报 `ErrLockOutsideTx`），`ToSQL()`。
+- 所有构建器不可变：每个方法返回新对象，可放心复用基础查询。
+
 ### 测试
 
-- 假驱动单元测试（`go test -race ./...`）：扫描、Raw 占位符改写、事务语义。
-- 真实数据库集成测试（`docker compose up -d --wait && go test -tags integration ./tests/integration/...`）：扫描、错误归一化、提交/回滚、savepoint 恢复、死锁重试、序列化重试、并发转账、手动事务取消。
+- 金标准测试（`builder_test.go`）：**每个用例对 MySQL 与 PostgreSQL 两个方言都断言生成的 SQL 与参数**，缺一即失败（`golden` 在两个方言期望值均为空时直接报错，防止漏断言）。
+- 集成测试（`tests/integration/builder_test.go`）：在真实 MySQL 8.4 / PostgreSQL 17 上验证插入回填、聚合与 JOIN、子查询与标量子查询、递归 CTE、upsert（含 `DoNothing` 的 MySQL 行别名歧义回归）、更新/删除护栏、`SKIP LOCKED` / `NOWAIT` 行锁、`CAST` 跨方言类型映射。
+- 命令：`go test -race ./...`；`docker compose up -d --wait && go test -tags integration ./tests/integration/...`。
+
+### M1 期间发现并修复的方言问题
+
+1. **MySQL upsert `DoNothing` 生成歧义列**：`AS new ON DUPLICATE KEY UPDATE name = name` 在存在行别名时 MySQL 报 `Error 1052: Column 'name' in field list is ambiguous`。修复为两侧都带表限定符：`` `customers`.`name` = `customers`.`name` ``。
+2. **`CAST` 的类型名不可移植**：MySQL 的 `CAST` 不接受 `BIGINT / INTEGER / BOOLEAN / VARCHAR / TIMESTAMP`，需映射为 `SIGNED / CHAR / DATETIME`。新增 `dialect.Dialect.CastType`，由方言吸收该差异；`xdb.Cast[int64]("BIGINT", x)` 在两个方言下都正确。
+3. **聚合结果类型**：`SUM(bigint)` 在 MySQL 返回 `DECIMAL`、在 PostgreSQL 返回 `NUMERIC`，直接扫入 `int64` 会失败。这是 SQL 语义而非框架缺陷，需用 `xdb.Cast[int64]("BIGINT", ...)` 显式转换——文档中已注明。

@@ -30,6 +30,27 @@ func (mysqlDialect) Name() string           { return "mysql" }
 func (mysqlDialect) DriverName() string     { return "mysql" }
 func (mysqlDialect) Placeholder(int) string { return "?" }
 func (mysqlDialect) MaxParams() int         { return 65535 }
+
+// castTypes 把可移植类型名映射为 MySQL 在 CAST 中接受的类型名。
+// MySQL 的 CAST 目标类型集合很小，不接受 BIGINT / INTEGER / BOOLEAN / VARCHAR / TIMESTAMP。
+var castTypes = map[string]string{
+	"BIGINT":    "SIGNED",
+	"INTEGER":   "SIGNED",
+	"INT":       "SIGNED",
+	"SMALLINT":  "SIGNED",
+	"BOOLEAN":   "SIGNED",
+	"BOOL":      "SIGNED",
+	"TEXT":      "CHAR",
+	"VARCHAR":   "CHAR",
+	"TIMESTAMP": "DATETIME",
+}
+
+func (mysqlDialect) CastType(logical string) string {
+	if v, ok := castTypes[strings.ToUpper(logical)]; ok {
+		return v
+	}
+	return logical
+}
 func (mysqlDialect) QuoteIdent(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }

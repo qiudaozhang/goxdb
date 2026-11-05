@@ -29,6 +29,9 @@ func (pgDialect) Name() string             { return "postgres" }
 func (pgDialect) DriverName() string       { return "pgx" }
 func (pgDialect) Placeholder(n int) string { return "$" + strconv.Itoa(n) }
 func (pgDialect) MaxParams() int           { return 65535 }
+
+// CastType 原样返回：PostgreSQL 的 CAST 接受标准类型名（BIGINT / INTEGER / TEXT / BOOLEAN ...）。
+func (pgDialect) CastType(logical string) string { return logical }
 func (pgDialect) QuoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }

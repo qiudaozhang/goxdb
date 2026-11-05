@@ -26,6 +26,10 @@ type Dialect interface {
 	Features() Features
 	// MaxParams 返回单条语句允许的最大绑定参数个数。
 	MaxParams() int
+	// CastType 把可移植的类型名映射为方言原生类型名，用于 CAST(x AS t)。
+	// 例如 MySQL 不接受 "BIGINT"，需映射为 "SIGNED"。
+	// 未列入映射的名字原样返回，以允许方言专属类型。
+	CastType(logical string) string
 	// ClassifyError 识别驱动错误。ok 为 true 表示这是服务端错误，
 	// 即服务端已收到请求并明确拒绝（区别于网络/客户端故障）。
 	ClassifyError(err error) (info ErrorInfo, ok bool)
