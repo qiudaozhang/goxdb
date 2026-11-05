@@ -1,0 +1,2 @@
+# fuzz 语料由 go test -fuzz 生成，不入库
+**/testdata/fuzz/

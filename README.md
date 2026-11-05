@@ -373,6 +373,30 @@ xdb.Query[User](xdb.Primary(db)).Where(U.ID.Eq(u.ID)).One(ctx)
 `INSERT ... RETURNING` 虽返回结果集，但按写操作路由到主库。主从延迟意味着刚写入的数据可能读不到，
 需要强一致时用事务或 `xdb.Primary(db)`。
 
+### 可观测性
+
+```go
+db, _ := xdb.Open("postgres", dsn,
+	xdb.WithHook(xdb.LogSlow(slog.Default(), 200*time.Millisecond)),
+	xdb.WithHook(metrics), // 见下
+)
+```
+
+内置（零外部依赖）：
+
+- `LogQueries` / `LogSlow`：slog 结构化日志与慢查询，默认不记录参数值
+- `NewMetrics()`：按「操作 × 成功/失败」聚合次数、耗时均值/最小/最大与行数
+
+```go
+m := xdb.NewMetrics()
+for _, s := range m.Snapshot() {
+	log.Printf("%s %s: n=%d avg=%v max=%v rows=%d", s.Op, s.Result, s.Count, s.Avg, s.Max, s.Rows)
+}
+```
+
+**OpenTelemetry 不内建**，用 `HookFuncs` 自己接（约 30 行）即可——框架不替所有用户承担
+OTel SDK + OTLP exporter 的依赖（约 28 条 go.mod 条目 / 90 个模块）。
+
 ## 错误处理
 
 ```go
@@ -397,6 +421,13 @@ go test -tags integration ./tests/integration/...
 ```
 
 连接串可用 `XDB_MYSQL_DSN` / `XDB_PG_DSN` 覆盖。
+
+Fuzz（占位符改写是安全边界，构建器渲染是注入防线）：
+
+```bash
+go test -run '^$' -fuzz FuzzBind -fuzztime 30s ./internal/sqlbind/
+go test -run '^$' -fuzz FuzzBuilder -fuzztime 30s .
+```
 
 基准（假驱动，隔离网络与服务端，反映框架自身开销）：
 

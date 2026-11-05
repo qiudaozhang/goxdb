@@ -536,19 +536,63 @@ type Hook interface {
 }
 ```
 
-内置：结构化日志（slog）、慢查询、OpenTelemetry tracing / metrics。
+**内置（零外部依赖）**：
 
-模型级回调（`BeforeInsert` / `AfterFind` 等）作为**可选接口**提供，仅对模型级 API 生效，批量 `Update[T]` 不触发——在文档中明确，避免“有时触发有时不触发”的困惑。
+- `LogQueries` / `LogSlow`：基于 slog 的结构化日志与慢查询，默认不记录参数值。
+- `NewMetrics()`：按「操作类型 × 成功/失败」聚合次数、总耗时、均值、最小/最大耗时与行数。
+  `Snapshot()` 返回快照，由调用方推送到自己的监控系统（Prometheus / OTLP / 日志均可）。
+
+**OpenTelemetry 不内建，由用户通过 Hook 接入。** 这是有意为之：
+
+- OTel 的 SDK + OTLP exporter 会带来约 28 条 go.mod 条目、90 个模块（含 gRPC、protobuf、genproto），
+  而 goxdb 核心目前只有 2 个直接依赖。为所有用户承担这份依赖不划算。
+- 用户自己写一个 `HookFuncs`（约 30 行）就能得到完整 tracing，并且能自行控制语义约定、
+  属性名与采样策略——比框架内建更灵活。
+
+```go
+xdb.WithHook(xdb.HookFuncs{
+    BeforeFunc: func(ctx context.Context, e *xdb.QueryEvent) context.Context {
+        ctx, span := tracer.Start(ctx, "db."+e.Op.String())
+        return context.WithValue(ctx, key{}, span)
+    },
+    AfterFunc: func(ctx context.Context, e *xdb.QueryEvent) {
+        span := ctx.Value(key{}).(trace.Span)
+        span.SetAttributes(attribute.String("db.statement", e.Query))
+        if e.Err != nil { span.RecordError(e.Err) }
+        span.End()
+    },
+})
+```
+
+模型级回调（`BeforeCreate` / `AfterFind` 等）作为**可选接口**提供，仅对模型级 API 生效，批量 `Update[T]` / `Delete[T]` 不触发——在文档中明确，避免“有时触发有时不触发”的困惑。
 
 ---
 
 ## 9. 测试策略
 
 1. **SQL 金标准测试**：每个构建器用例对两个方言分别断言生成的 SQL 与参数（不需要数据库，跑得飞快）。
-2. **集成测试**：docker compose / testcontainers 启动 MySQL 8.0、8.4，PG 14、17，CI 矩阵跑全部用例。
+2. **集成测试**：`docker compose up -d --wait` 启动 MySQL 8.4 与 PostgreSQL 17，跑全部用例。
+   本地已验证这两个版本；MySQL 8.0 与 PG 14 尚未实际验证（方言实现按 8.0 / 14+ 的语法编写，
+   但缺少对应版本的实跑记录）。
 3. **事务专项**：并发转账一致性、savepoint 回滚、panic 回滚、ctx 取消回滚、死锁/序列化失败重试、连接泄漏检测（测试结束断言 `db.Stats().InUse == 0`）。
-4. **Fuzz**：构建器 + Raw 占位符改写。
-5. **Benchmark**：与 database/sql、sqlx、GORM、bun 对比。
+4. **Fuzz**：`FuzzBind`（占位符改写，安全边界）+ `FuzzBuilder`（构建器渲染）。
+   断言的不只是「不 panic」，还包括参数原样保留、占位符编号连续、改写确定性。
+   已跑过数百万次执行无失败。
+5. **Benchmark**：`bench_test.go` 覆盖渲染、结构体取值、单行/批量/标量扫描、元数据查找，
+   以 `database/sql` 直连为基线。与 sqlx / GORM / bun 的横向对比尚未做。
+
+**CI 现状**：暂无 CI。仓库为私有，Actions 按分钟计费；完整的矩阵（Go 版本 × 4 个数据库版本 + fuzz）
+单次约消耗 22 分钟额度，开发期不划算。本地用下列命令做等价验证：
+
+```bash
+gofmt -l . && go vet ./... && go vet -tags integration ./... \
+  && go test -race -count=1 ./... \
+  && docker compose up -d --wait && go test -tags integration -count=1 ./tests/integration/... \
+  && go test -run '^$' -fuzz FuzzBind -fuzztime 30s ./internal/sqlbind/ \
+  && go test -run '^$' -fuzz FuzzBuilder -fuzztime 30s .
+```
+
+仓库转为公开（Actions 免费）或有协作者后再启用 CI。
 
 ---
 
