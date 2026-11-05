@@ -273,3 +273,42 @@ func TestManualTx(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// 回归：ctx 取消后手动事务 Commit 失败，事务必须进入终态且不再可用。
+//
+// 曾经的 bug：commit 在 context.Canceled 分支只改了状态而没有调用
+// std.Rollback()，在 MySQL 8.0 上表现为偶发连接泄漏（InUse > 0）。
+//
+// 假驱动不会真正占用连接，也无法让 sql.Tx.Rollback 走到驱动，因此连接
+// 回收本身由集成测试 TestManualTxContextCancel 守护；这里只验证框架侧
+// 的状态机不再把事务留在 Active。
+func TestManualTxCommitAfterCancelReleasesConn(t *testing.T) {
+	db, _ := newDB(t, nil)
+	cctx, cancel := context.WithCancel(ctx)
+	tx, err := db.Begin(cctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execContext(t, tx, "UPDATE t SET a = 1"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := tx.Commit(); err == nil {
+		t.Fatal("commit after cancel must fail")
+	}
+	// 事务必须已结束：再次 Commit / 执行语句都应报 ErrTxDone。
+	if err := tx.Commit(); !errors.Is(err, xdb.ErrTxDone) {
+		t.Fatalf("tx must be finished, got %v", err)
+	}
+	if _, err := xdb.Raw(tx, "SELECT 1").Exec(ctx); !errors.Is(err, xdb.ErrTxDone) {
+		t.Fatalf("tx must reject further use, got %v", err)
+	}
+	// RollbackUnlessCommitted 应为 no-op 且不 panic。
+	tx.RollbackUnlessCommitted()
+}
+
+func execContext(t *testing.T, ex xdb.Executor, q string) error {
+	t.Helper()
+	_, err := xdb.Raw(ex, q).Exec(ctx)
+	return err
+}

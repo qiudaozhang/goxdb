@@ -1,4 +1,14 @@
-# 集成测试用数据库。启动：docker compose up -d --wait
+# 集成测试用数据库。
+#
+#   默认（当前支持的最低/最高版本）：
+#     docker compose up -d --wait
+#     go test -tags integration ./tests/integration/...
+#
+#   旧版本兼容性验证（MySQL 8.0 / PostgreSQL 14）：
+#     docker compose --profile legacy up -d --wait
+#     XDB_MYSQL_DSN='root:xdb@tcp(127.0.0.1:23306)/xdb?parseTime=true' \
+#     XDB_PG_DSN='postgres://postgres:xdb@127.0.0.1:25432/xdb?sslmode=disable' \
+#       go test -tags integration ./tests/integration/...
 services:
   mysql:
     image: mysql:8.4
@@ -10,12 +20,38 @@ services:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pxdb"]
       interval: 2s
       retries: 60
+
   postgres:
     image: postgres:17-alpine
     environment:
       POSTGRES_PASSWORD: xdb
       POSTGRES_DB: xdb
     ports: ["15432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 60
+
+  # ---- 旧版本（profile: legacy），只在显式指定时启动 ----
+  mysql80:
+    profiles: ["legacy"]
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: xdb
+      MYSQL_DATABASE: xdb
+    ports: ["23306:3306"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pxdb"]
+      interval: 2s
+      retries: 90
+
+  postgres14:
+    profiles: ["legacy"]
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_PASSWORD: xdb
+      POSTGRES_DB: xdb
+    ports: ["25432:5432"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 2s

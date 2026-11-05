@@ -571,9 +571,10 @@ xdb.WithHook(xdb.HookFuncs{
 ## 9. 测试策略
 
 1. **SQL 金标准测试**：每个构建器用例对两个方言分别断言生成的 SQL 与参数（不需要数据库，跑得飞快）。
-2. **集成测试**：`docker compose up -d --wait` 启动 MySQL 8.4 与 PostgreSQL 17，跑全部用例。
-   本地已验证这两个版本；MySQL 8.0 与 PG 14 尚未实际验证（方言实现按 8.0 / 14+ 的语法编写，
-   但缺少对应版本的实跑记录）。
+2. **集成测试**：`docker compose up -d --wait` 启动 MySQL 8.4 与 PostgreSQL 17。
+   旧版本用 `docker compose --profile legacy up -d --wait` 启动 MySQL 8.0 / PostgreSQL 14，
+   再以 `XDB_MYSQL_DSN` / `XDB_PG_DSN` 指向对应端口运行。
+   已在 **MySQL 8.0 / 8.4 与 PostgreSQL 14 / 17 四个组合**上全部跑通。
 3. **事务专项**：并发转账一致性、savepoint 回滚、panic 回滚、ctx 取消回滚、死锁/序列化失败重试、连接泄漏检测（测试结束断言 `db.Stats().InUse == 0`）。
 4. **Fuzz**：`FuzzBind`（占位符改写，安全边界）+ `FuzzBuilder`（构建器渲染）。
    断言的不只是「不 panic」，还包括参数原样保留、占位符编号连续、改写确定性。
@@ -646,6 +647,13 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
   - 结构体名冲突自动加序号；`created_at` 等时间列自动补 `autoCreateTime`，但只在类型确实是时间时生效。
   - 指定不存在的表会报错，而不是静默生成空文件。
 - 待完成：pgx 原生连接（`database/sql` 之上的原生接口，属性能优化项，不影响功能）。
+
+### 版本覆盖发现的问题
+
+跑 MySQL 8.0 / PostgreSQL 14 矩阵时发现一个真实缺陷：手动事务在 **ctx 取消后 Commit 失败**时，
+`commit()` 只把状态改成 `RolledBack` 而没有调用 `std.Rollback()`，`database/sql` 底层的连接
+迟迟无法归还连接池，在 MySQL 8.0 上表现为偶发 `db.Stats().InUse > 0`。修复为在这些分支显式
+回滚（对已结束的事务是幂等的）。这说明单版本验证会漏掉与版本相关的时序差异。
 
 ### M2（已完成）
 

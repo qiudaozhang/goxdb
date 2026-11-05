@@ -538,16 +538,21 @@ func (t *Tx) commit() error {
 
 	var result error
 	var callbacks []func()
+	// mustRollback 表示事务未被 database/sql 结束、需要显式 Rollback 以归还连接。
+	var mustRollback bool
 	r.mu.Lock()
 	switch {
 	case err == nil:
 		r.state = txCommitted
 		callbacks = r.afterCommit
 	case errors.Is(err, sql.ErrTxDone), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// database/sql 在发出 COMMIT 之前就已拒绝（事务已被回滚）。
+		// database/sql 已拒绝该事务：可能是 ctx 取消后驱动已回滚，也可能只是
+		// Commit 失败而事务仍占着连接。为稳妥起见显式 Rollback（对已结束的
+		// 事务是幂等的），否则连接可能长时间无法归还连接池。
 		r.state = txRolledBack
 		callbacks = r.afterRollback
 		result = fmt.Errorf("xdb: commit failed, transaction was rolled back: %w", err)
+		mustRollback = true
 	default:
 		if _, ok := t.db.d.ClassifyError(err); ok {
 			// 服务端明确拒绝了提交：事务未生效。
@@ -561,6 +566,12 @@ func (t *Tx) commit() error {
 	}
 	r.afterCommit, r.afterRollback = nil, nil
 	r.mu.Unlock()
+
+	if mustRollback {
+		// 释放连接。忽略错误：事务在服务端可能已结束，这里的目的是让
+		// database/sql 把连接还回池里。
+		_ = r.std.Rollback()
+	}
 
 	ev.Err = result
 	t.db.after(hctx, ev)

@@ -420,6 +420,17 @@ docker compose up -d --wait
 go test -tags integration ./tests/integration/...
 ```
 
+旧版本兼容性验证（MySQL 8.0 / PostgreSQL 14）：
+
+```bash
+docker compose --profile legacy up -d --wait
+XDB_MYSQL_DSN='root:xdb@tcp(127.0.0.1:23306)/xdb?parseTime=true' \
+XDB_PG_DSN='postgres://postgres:xdb@127.0.0.1:25432/xdb?sslmode=disable' \
+  go test -tags integration ./tests/integration/...
+```
+
+已验证矩阵：MySQL 8.0 / 8.4 × PostgreSQL 14 / 17。
+
 连接串可用 `XDB_MYSQL_DSN` / `XDB_PG_DSN` 覆盖。
 
 Fuzz（占位符改写是安全边界，构建器渲染是注入防线）：
