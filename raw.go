@@ -133,6 +133,9 @@ func All[T any](ctx context.Context, s Statement) ([]T, error) {
 		if err := c.scan(reflect.ValueOf(&x).Elem()); err != nil {
 			return nil, c.close(err)
 		}
+		if err := afterFind(ctx, &x); err != nil {
+			return nil, c.close(wrapCallback("AfterFind", err))
+		}
 		out = append(out, x)
 	}
 	if err := c.close(nil); err != nil {
@@ -144,10 +147,13 @@ func All[T any](ctx context.Context, s Statement) ([]T, error) {
 // One 执行语句并返回恰好一行：无结果返回 ErrNotFound，多于一行返回 ErrMultipleRows。
 func One[T any](ctx context.Context, s Statement) (T, error) {
 	var x T
-	err := scanOne(ctx, s.stmt(), reflect.ValueOf(&x).Elem())
-	if err != nil {
+	if err := scanOne(ctx, s.stmt(), reflect.ValueOf(&x).Elem()); err != nil {
 		var zero T
 		return zero, err
+	}
+	if err := afterFind(ctx, &x); err != nil {
+		var zero T
+		return zero, wrapCallback("AfterFind", err)
 	}
 	return x, nil
 }
@@ -172,6 +178,10 @@ func Iter[T any](ctx context.Context, s Statement) iter.Seq2[T, error] {
 			var x T
 			if err := c.scan(reflect.ValueOf(&x).Elem()); err != nil {
 				yield(zero, c.close(err))
+				return
+			}
+			if err := afterFind(ctx, &x); err != nil {
+				yield(zero, c.close(wrapCallback("AfterFind", err)))
 				return
 			}
 			if !yield(x, nil) {

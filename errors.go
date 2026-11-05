@@ -19,6 +19,8 @@ var (
 	ErrMultipleRows = errors.New("xdb: query returned more than one row")
 	// ErrNoExecutor：语句没有绑定 Executor（例如作为子查询构造的语句被直接执行）。
 	ErrNoExecutor = errors.New("xdb: statement has no executor")
+	// ErrUnknownRelation：Preload 指定的关联字段不存在（或未带 rel 标签）。
+	ErrUnknownRelation = errors.New("xdb: model has no such relation")
 	// ErrInvalidDest：Scan 的目标不是非 nil 指针。
 	ErrInvalidDest = errors.New("xdb: scan destination must be a non-nil pointer")
 

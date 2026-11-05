@@ -225,7 +225,23 @@ func (q *UpdateQ[T]) ToSQL() (string, []any, error) {
 // 由 UpdateModel 构造且模型带 autoUpdateTime 字段时，会在执行前把该字段设为当前时间
 // 并加入 SET（若调用方显式 Set 过该列则尊重调用方的值）。
 func (q *UpdateQ[T]) Exec(ctx context.Context) (int64, error) {
-	return execStmt(ctx, q.ex, q.renderForExec)
+	// BeforeUpdate 只在 UpdateModel 这类持有具体模型的场景触发；
+	// 按条件批量 Update[T] 不触发行级回调（无法知道会命中哪些行）。
+	for _, row := range q.touched {
+		if err := beforeUpdate(ctx, row.Addr().Interface()); err != nil {
+			return 0, wrapCallback("BeforeUpdate", err)
+		}
+	}
+	n, err := execStmt(ctx, q.ex, q.renderForExec)
+	if err != nil {
+		return n, err
+	}
+	for _, row := range q.touched {
+		if err := afterUpdate(ctx, row.Addr().Interface()); err != nil {
+			return n, wrapCallback("AfterUpdate", err)
+		}
+	}
+	return n, nil
 }
 
 // renderForExec 先填充 autoUpdateTime，再渲染；只用于执行路径，ToSQL / SQL 保持不变。

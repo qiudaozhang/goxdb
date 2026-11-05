@@ -413,6 +413,12 @@ func (q *InsertQ[T]) Exec(ctx context.Context) (int64, error) {
 	if len(q.rows) == 0 {
 		return 0, nil
 	}
+	// 模型回调：BeforeCreate 在写入前逐行调用；任一行失败则整批不执行。
+	for _, row := range q.rows {
+		if err := beforeCreate(ctx, row.Addr().Interface()); err != nil {
+			return 0, wrapCallback("BeforeCreate", err)
+		}
+	}
 	// 只在真正执行时填充时间戳：ToSQL/SQL 是只读调试接口，不应修改模型。
 	q.stampTimes(fields, q.now())
 	d := q.ex.Dialect()
@@ -443,6 +449,12 @@ func (q *InsertQ[T]) Exec(ctx context.Context) (int64, error) {
 			if err := q.backfillLastID(ctx, res, chunk); err != nil {
 				return total, err
 			}
+		}
+	}
+	// AfterCreate 在所有语句成功之后调用：此时自增主键已回填。
+	for _, row := range q.rows {
+		if err := afterCreate(ctx, row.Addr().Interface()); err != nil {
+			return total, wrapCallback("AfterCreate", err)
 		}
 	}
 	return total, nil

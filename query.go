@@ -22,10 +22,11 @@ var ErrLockOutsideTx = errors.New("xdb: row locks (FOR UPDATE / FOR SHARE) requi
 // Q 同时是一个类型为 T 的表达式（渲染为带括号的子查询），可直接用于
 // InSub、Exists、Derived、CTE 等位置。
 type Q[T any] struct {
-	ex      Executor
-	c       selectCore
-	lenient bool
-	err     error
+	ex       Executor
+	c        selectCore
+	preloads []preloadSpec
+	lenient  bool
+	err      error
 }
 
 type joinClause struct {
@@ -213,11 +214,32 @@ func (q *Q[T]) Lenient() *Q[T] { c := q.clone(); c.lenient = true; return c }
 
 // ---------- 执行 ----------
 
-// All 返回全部行；无结果时为空切片。
-func (q *Q[T]) All(ctx context.Context) ([]T, error) { return All[T](ctx, q) }
+// All 返回全部行；无结果时为空切片。声明了 Preload 时会随后加载关联。
+func (q *Q[T]) All(ctx context.Context) ([]T, error) {
+	out, err := All[T](ctx, q)
+	if err != nil || len(q.preloads) == 0 || len(out) == 0 {
+		return out, err
+	}
+	rv := reflect.ValueOf(out)
+	if err := q.runPreloads(ctx, rv); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 // One 返回恰好一行：无结果返回 ErrNotFound，多于一行返回 ErrMultipleRows。
-func (q *Q[T]) One(ctx context.Context) (T, error) { return One[T](ctx, q) }
+func (q *Q[T]) One(ctx context.Context) (T, error) {
+	out, err := One[T](ctx, q)
+	if err != nil || len(q.preloads) == 0 {
+		return out, err
+	}
+	rv := reflect.ValueOf([]T{out})
+	if err := q.runPreloads(ctx, rv); err != nil {
+		var zero T
+		return zero, err
+	}
+	return rv.Index(0).Interface().(T), nil
+}
 
 // First 加上 LIMIT 1 后返回第一行，无结果返回 ErrNotFound。通常应配合 OrderBy 使用。
 func (q *Q[T]) First(ctx context.Context) (T, error) { return One[T](ctx, q.Limit(1)) }

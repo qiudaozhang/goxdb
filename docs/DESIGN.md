@@ -588,13 +588,15 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 - **锁与调试**：`ForUpdate / ForShare / NoWait / SkipLocked`（非事务内使用报 `ErrLockOutsideTx`），`ToSQL()`。
 - 所有构建器不可变：每个方法返回新对象，可放心复用基础查询。
 
-### M2 进行中（已完成部分）
+### M2（已完成）
 
+- **代码生成 `goxdb gen`**：`go run github.com/qiudaozhang/goxdb/cmd/goxdb -dir ./model` 扫描带 `xdb` 标签的结构体，生成类型化的表与列描述符（`var U = struct{ xdb.Table; ID xdb.NumberCol[int64]; ... }`）。列类型由 Go 字段类型决定，`U.Age.Eq("abc")` 编译失败。`TableName()` 的值优先于 snake_case 复数推导；没有 `xdb` 标签的结构体（DTO）不生成。描述符变量名取类型名的大写字母（`User` → `U`），与类型名冲突时回退为 `<Type>Table`。
+- **关联预加载 `Preload`**：`Query[T](db).Preload("Orders", conds...)`，支持 has_many / has_one / belongs_to。实现为主查询 → 收集键 → `WHERE fk IN (...)` 分批查询 → 内存回填，超长自动分批。未 Preload 的关联保持零值（不做隐式懒加载）；关联名不存在返回 `ErrUnknownRelation`。
+- **模型级回调**：可选接口 `Creator / Created / Updater / Updated / Finder`（`BeforeCreate`、`AfterCreate`、`BeforeUpdate`、`AfterUpdate`、`AfterFind`）。只在「操作具体模型实例」的 API 上触发行级回调——`Insert / InsertMany / UpdateModel / 查询` 触发，批量 `Update[T] / Delete[T]` 不触发（无法知道会命中哪些行）。回调错误可用 `errors.Is(err, xdb.ErrCallback)` 识别，`BeforeCreate` 失败会阻止写入。
 - **自动时间戳**：`xdb:"created_at,autoCreateTime"` / `xdb:"updated_at,autoUpdateTime"`。插入时填零值字段（显式赋值优先），`UpdateModel` 时把 `autoUpdateTime` 刷成当前时间并回写模型，`UpdateModel` 默认不再更新 `autoCreateTime` 列。时钟可用 `xdb.WithClock` 注入，便于测试与可预测写入。
 - **多表写操作**：`Update[T]().Join(...)` / `Delete[T]().Join(...)`，由 `Features.UpdateJoinStyle` 翻译：MySQL 为 `UPDATE a JOIN b ON ... SET` / `DELETE a FROM a JOIN b ON ...`，PostgreSQL 为 `UPDATE a SET ... FROM b WHERE` / `DELETE FROM a USING b WHERE`（连接条件下沉到 WHERE）。
 - **`INSERT ... SELECT`**：`xdb.InsertSelect[T](db, query).Columns(...)`；列按**列名**映射到目标模型（不像其他写入那样要求列属于目标表，因为归档表往往没有描述符），不填充自增与时间戳。
 - **基准测试**（`bench_test.go`）：纯渲染、结构体→INSERT 参数、单行/90 行扫描、标量扫描、元数据查找，并以 `database/sql` 直连作为基线，用于持续盯住反射开销。
-- 尚未完成：`goxdb gen` 代码生成、`Preload`、模型级回调。
 
 ### 测试
 

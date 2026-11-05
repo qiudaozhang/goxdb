@@ -27,12 +27,30 @@ type Audit struct {
 	Operator  string
 }
 
+type Order struct {
+	ID     int64 `xdb:"id,pk,auto"`
+	UserID int64 `xdb:"user_id"`
+}
+
+type Profile struct {
+	ID     int64  `xdb:"id,pk,auto"`
+	UserID int64  `xdb:"user_id"`
+	Bio    string `xdb:"bio"`
+}
+
+type Team struct {
+	ID   int64  `xdb:"id,pk,auto"`
+	Name string `xdb:"name"`
+}
+
 type User struct {
 	Base
 	*Audit
-	Name    string `xdb:"name"`
-	Secret  string `xdb:"-"`
-	Orders  []int  `xdb:"rel:has_many,fk:user_id"`
+	Name    string   `xdb:"name"`
+	Secret  string   `xdb:"-"`
+	Orders  []Order  `xdb:"rel:has_many,fk:user_id"`
+	Profile *Profile `xdb:"rel:has_one,fk:user_id"`
+	Team    *Team    `xdb:"rel:belongs_to,fk:team_id"`
 	private int
 }
 
@@ -59,6 +77,23 @@ func TestModel(t *testing.T) {
 	}
 	if op, _ := m.Lookup("operator"); !reflect.DeepEqual(op.Index, []int{1, 1}) {
 		t.Fatalf("operator index %v", op.Index)
+	}
+	for _, c := range []struct {
+		name string
+		kind RelationKind
+		fk   string
+	}{
+		{"Orders", HasMany, "user_id"},
+		{"Profile", HasOne, "user_id"},
+		{"Team", BelongsTo, "team_id"},
+	} {
+		r, ok := m.Relations[c.name]
+		if !ok {
+			t.Fatalf("relation %s not parsed", c.name)
+		}
+		if r.Kind != c.kind || r.FK != c.fk {
+			t.Fatalf("relation %s = %v/%s, want %v/%s", c.name, r.Kind, r.FK, c.kind, c.fk)
+		}
 	}
 }
 

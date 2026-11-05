@@ -27,6 +27,28 @@ type Field struct {
 // Has 判断是否存在某个标签选项。
 func (f *Field) Has(opt string) bool { _, ok := f.Options[opt]; return ok }
 
+// RelationKind 是关联的种类。
+type RelationKind string
+
+const (
+	// HasMany：一对多，外键在对方表上（user -> orders.user_id）。
+	HasMany RelationKind = "has_many"
+	// HasOne：一对一，外键在对方表上。
+	HasOne RelationKind = "has_one"
+	// BelongsTo：属于，外键在本表上（order.user_id -> users.id）。
+	BelongsTo RelationKind = "belongs_to"
+)
+
+// Relation 是模型上的一个关联字段（标签含 rel 选项，不是列）。
+type Relation struct {
+	GoName string       // 字段名（用于错误信息与 Preload 定位）
+	Index  []int        // reflect 索引路径
+	Kind   RelationKind // 关联种类
+	FK     string       // 外键列名
+	Type   reflect.Type // 字段类型（可为切片、指针或结构体）
+	Target reflect.Type // 关联目标的元素类型
+}
+
 // Model 是结构体类型解析后的元数据。
 type Model struct {
 	Type   reflect.Type
@@ -38,8 +60,10 @@ type Model struct {
 	// 由框架在写入时填充（必须在写入前可 settable）。
 	CreateTime *Field
 	UpdateTime *Field
-	byName     map[string]*Field
-	byLower    map[string]*Field
+	// Relations 是按字段名索引的关联定义。
+	Relations map[string]*Relation
+	byName    map[string]*Field
+	byLower   map[string]*Field
 }
 
 // Lookup 按列名查找字段：先精确匹配，再忽略大小写匹配。
@@ -97,7 +121,8 @@ type candidate struct {
 
 func parse(t reflect.Type) (*Model, error) {
 	var cands []candidate
-	if err := walk(t, nil, "", 0, &cands, map[reflect.Type]bool{}); err != nil {
+	var rels []*Relation
+	if err := walk(t, nil, "", 0, &cands, &rels, map[reflect.Type]bool{}); err != nil {
 		return nil, err
 	}
 	// 与 encoding/json 相同的冲突规则：层级最浅者胜出；
@@ -111,6 +136,12 @@ func parse(t reflect.Type) (*Model, error) {
 		groups[c.f.Column] = append(groups[c.f.Column], c)
 	}
 	m := &Model{Type: t, Table: tableName(t), byName: map[string]*Field{}, byLower: map[string]*Field{}}
+	if len(rels) > 0 {
+		m.Relations = make(map[string]*Relation, len(rels))
+		for _, r := range rels {
+			m.Relations[r.GoName] = r
+		}
+	}
 	for _, name := range order {
 		f, ok := dominant(groups[name])
 		if !ok {
@@ -185,7 +216,7 @@ func dominant(cs []candidate) (*Field, bool) {
 	return nil, false
 }
 
-func walk(t reflect.Type, index []int, prefix string, depth int, out *[]candidate, visiting map[reflect.Type]bool) error {
+func walk(t reflect.Type, index []int, prefix string, depth int, out *[]candidate, relOut *[]*Relation, visiting map[reflect.Type]bool) error {
 	if visiting[t] {
 		return nil // 递归嵌入，停止
 	}
@@ -199,7 +230,16 @@ func walk(t reflect.Type, index []int, prefix string, depth int, out *[]candidat
 			continue
 		}
 		name, opts := parseTag(tag)
-		if _, isRel := opts["rel"]; isRel {
+		if rel, isRel := opts["rel"]; isRel {
+			if !sf.IsExported() {
+				continue
+			}
+			idx := append(append([]int(nil), index...), i)
+			r, err := newRelation(sf, idx, rel, opts)
+			if err != nil {
+				return err
+			}
+			*relOut = append(*relOut, r)
 			continue // 关联字段不是列
 		}
 		idx := append(append([]int(nil), index...), i)
@@ -214,7 +254,7 @@ func walk(t reflect.Type, index []int, prefix string, depth int, out *[]candidat
 				if !sf.IsExported() && ft.Kind() == reflect.Pointer {
 					continue // 无法为未导出的嵌入指针分配内存
 				}
-				if err := walk(et, idx, prefix+sf.Name+".", depth+1, out, visiting); err != nil {
+				if err := walk(et, idx, prefix+sf.Name+".", depth+1, out, relOut, visiting); err != nil {
 					return err
 				}
 				continue
@@ -296,6 +336,42 @@ func parseTag(tag string) (string, map[string]string) {
 		opts[k] = v
 	}
 	return name, opts
+}
+
+// newRelation 由字段与标签构造关联定义。
+// kind 来自 rel:has_many / rel:has_one / rel:belongs_to，fk 为外键列名（必填）。
+func newRelation(sf reflect.StructField, idx []int, kind string, opts map[string]string) (*Relation, error) {
+	fk := opts["fk"]
+	if fk == "" {
+		return nil, fmt.Errorf("goxdb: %s.%s has rel:%s but no fk: option", sf.Type, sf.Name, kind)
+	}
+	var k RelationKind
+	switch RelationKind(kind) {
+	case HasMany, HasOne, BelongsTo:
+		k = RelationKind(kind)
+	default:
+		return nil, fmt.Errorf("goxdb: %s.%s has unknown relation kind %q (want has_many, has_one or belongs_to)", sf.Type, sf.Name, kind)
+	}
+	r := &Relation{GoName: sf.Name, Index: idx, Kind: k, FK: fk, Type: sf.Type, Target: sf.Type}
+	switch {
+	case k == HasMany:
+		if sf.Type.Kind() != reflect.Slice {
+			return nil, fmt.Errorf("goxdb: %s.%s is rel:has_many but is %s, want a slice", sf.Type, sf.Name, sf.Type)
+		}
+		r.Target = sf.Type.Elem()
+	case k == HasOne, k == BelongsTo:
+		if sf.Type.Kind() != reflect.Pointer {
+			return nil, fmt.Errorf("goxdb: %s.%s is rel:%s but is %s, want a pointer", sf.Type, sf.Name, kind, sf.Type)
+		}
+		r.Target = sf.Type.Elem()
+	}
+	if r.Target.Kind() == reflect.Pointer {
+		r.Target = r.Target.Elem()
+	}
+	if r.Target.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("goxdb: %s.%s relation target must be a struct, got %s", sf.Type, sf.Name, r.Target)
+	}
+	return r, nil
 }
 
 // checkAutoTime 校验自动时间戳字段可被写入：必须是 time.Time，

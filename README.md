@@ -2,8 +2,8 @@
 
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
-> 当前进度：**M0 地基** 与 **M1 类型化查询构建器** 已完成；**M2** 已完成自动时间戳、多表 UPDATE/DELETE、
-> INSERT…SELECT，代码生成与关联预加载开发中。整体设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
+> 当前进度：**M0 地基**、**M1 类型化查询构建器**、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
+> 多表写操作、INSERT…SELECT）均已完成。整体设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 安装
 
@@ -173,6 +173,84 @@ xdb.InsertSelect[ArchivedOrder](db,
 		From(Order).Where(Order.State.Eq("old")),
 ).Columns(Order.UserID, Order.Amount, Order.State).Exec(ctx)
 ```
+
+### 代码生成
+
+在模型包内执行，生成类型化的表与列描述符：
+
+```bash
+go run github.com/qiudaozhang/goxdb/cmd/goxdb -dir ./model
+# 或写在文件里：//go:generate go run github.com/qiudaozhang/goxdb/cmd/goxdb
+```
+
+给定：
+
+```go
+type User struct {
+	ID        int64     `xdb:"id,pk,auto"`
+	Name      string    `xdb:"name"`
+	Age       int       `xdb:"age"`
+	CreatedAt time.Time `xdb:"created_at"`
+}
+```
+
+生成 `xdb_gen.go`：
+
+```go
+var U = struct {
+	xdb.Table
+	ID        xdb.NumberCol[int64]
+	Name      xdb.StringCol
+	Age       xdb.NumberCol[int]
+	CreatedAt xdb.TimeCol
+}{}
+```
+
+列类型由 Go 字段类型决定，因此 `U.Age.Eq("abc")` **编译失败**。
+
+### 关联预加载
+
+```go
+type User struct {
+	ID     int64   `xdb:"id,pk,auto"`
+	Orders []Order `xdb:"rel:has_many,fk:user_id"`
+}
+
+type Order struct {
+	ID     int64  `xdb:"id,pk,auto"`
+	UserID int64  `xdb:"user_id"`
+	State  string `xdb:"state"`
+	User   *User  `xdb:"rel:belongs_to,fk:user_id"`
+}
+
+// 两次查询完成，不会 N+1
+users, err := xdb.Query[User](db).Preload("Orders").All(ctx)
+
+// 带过滤条件的关联
+users, err = xdb.Query[User](db).Preload("Orders", O.State.Eq("paid")).All(ctx)
+
+orders, err := xdb.Query[Order](db).Preload("User").All(ctx) // belongs_to
+```
+
+未 Preload 的关联保持零值——**不做隐式懒加载**。
+
+### 模型回调
+
+实现可选接口即可自动生效：
+
+```go
+func (u *User) BeforeCreate(ctx context.Context) error { return u.Validate() }
+func (u *User) AfterFind(ctx context.Context) error   { return u.Decrypt() }
+```
+
+| API | BeforeCreate | AfterCreate | BeforeUpdate | AfterUpdate | AfterFind |
+|---|---|---|---|---|---|
+| `Insert` / `InsertMany` | ✓ | ✓ | | | |
+| `UpdateModel` | | | ✓ | ✓ | |
+| `Query` / `Select` | | | | | ✓ |
+| `Update[T]` / `Delete[T]`（批量） | | | | | |
+
+批量按条件的写操作不触发行级回调。回调失败可用 `errors.Is(err, xdb.ErrCallback)` 判断。
 
 ### 自动时间戳
 
