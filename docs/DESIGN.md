@@ -596,7 +596,12 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
   - MySQL 的 `??` 占位符转义对 `?` 操作符不友好，因此 `HasKey` 改用等价的 `jsonb_exists()` 函数。
 - **`xdb.Lit[T]`**：把一个原样输出的 SQL 片段包装为表达式（不做参数绑定）。方言扩展包用它内联固定语法；因为它绕过参数绑定，文档中明确要求只用于代码常量，禁止传入用户输入。
 - **读写分离**：`xdb.WithReplica(replicaPool)`。`Executor.session(readOnly bool)` 区分意图：只读查询（All / One / Iter / Count / Exists / Pluck）走副本，写操作与事务始终走主库。`INSERT ... RETURNING` 虽然返回结果集，但按写操作处理（`doQuery(..., readOnly=false)`）——这是个容易写错的地方，测试专门覆盖。`xdb.Primary(db)` 提供强一致读的逃生通道；同一连接池同时作为主库与副本时自动忽略副本配置。
-- 待完成：pgx 原生连接、DB-first 反向生成模型。
+- **DB-first 反向生成**：`goxdb -db postgres -dsn "$DSN" -dir ./model` 读 information_schema，生成 Go 模型结构体。方言通过 `dialect.Introspector`（`ListTables` / `DescribeTable`）提供 schema 读取，MySQL 与 PostgreSQL 各有一份实现。
+  - 类型映射：`dialect.Column.Type` 存映射后的 Go 类型；可空列生成指针，保持「可空 = 可为 nil」。
+  - 命名：复数表名单数化（`user_profiles` → `UserProfile`），`id` 字段固定为 `ID`；`status`/`analysis` 等以 `us`/`is` 结尾的词不做单数化（避免 `statu`）。
+  - 结构体名冲突自动加序号；`created_at` 等时间列自动补 `autoCreateTime`，但只在类型确实是时间时生效。
+  - 指定不存在的表会报错，而不是静默生成空文件。
+- 待完成：pgx 原生连接（`database/sql` 之上的原生接口，属性能优化项，不影响功能）。
 
 ### M2（已完成）
 

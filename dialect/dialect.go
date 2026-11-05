@@ -5,7 +5,10 @@
 package dialect
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 )
@@ -171,4 +174,33 @@ func Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Column 是数据库中的一列，用于 DB-first 反向生成模型。
+type Column struct {
+	Name     string
+	DataType string // 方言原生类型，如 "varchar(50)"、"int8"
+	Nullable bool
+	Default  string
+	IsPK     bool
+	AutoInc  bool
+	Type     reflect.Type // 映射后的 Go 类型
+}
+
+// Table 是数据库中的一张表。
+type Table struct {
+	Name    string
+	Columns []Column
+	PK      []string
+}
+
+// Introspector 由支持 DB-first 的方言实现：列出表、读取列信息。
+//
+// 查询用 database/sql 执行（传入 *sql.DB），因此方言包需要自行编写
+// information_schema 查询。返回值用于生成 Go 模型代码。
+type Introspector interface {
+	// ListTables 返回表名（已排除系统表与视图）。
+	ListTables(ctx context.Context, db *sql.DB) ([]string, error)
+	// DescribeTable 返回表的列信息。
+	DescribeTable(ctx context.Context, db *sql.DB, table string) (*Table, error)
 }

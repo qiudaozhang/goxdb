@@ -3,7 +3,7 @@
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
 > 当前进度：**M0** 地基、**M1** 查询构建器、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
-> 多表写、INSERT…SELECT）、**M3**（窗口函数、软删除、方言扩展包、读写分离）已完成。
+> 多表写、INSERT…SELECT）、**M3**（窗口函数、软删除、方言扩展包、读写分离、DB-first 反向生成）已完成。
 > 设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 安装
@@ -183,6 +183,15 @@ xdb.InsertSelect[ArchivedOrder](db,
 go run github.com/qiudaozhang/goxdb/cmd/goxdb -dir ./model
 # 或写在文件里：//go:generate go run github.com/qiudaozhang/goxdb/cmd/goxdb
 ```
+
+反过来也支持 **DB-first**：从已有数据库反向生成模型结构体。
+
+```bash
+goxdb -db postgres -dsn "$DSN" -dir ./model -reverse-out models.go
+goxdb -db mysql -dsn "$DSN" -dir ./model -tables users,orders -prefix t_
+```
+
+生成的代码包含 `xdb` 标签、`TableName()`，可空列用指针，`created_at` 自动补时间戳标签。
 
 给定：
 
