@@ -1,0 +1,22 @@
+# 集成测试用数据库。启动：docker compose up -d --wait
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: xdb
+      MYSQL_DATABASE: xdb
+    ports: ["13306:3306"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pxdb"]
+      interval: 2s
+      retries: 60
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: xdb
+      POSTGRES_DB: xdb
+    ports: ["15432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 60
