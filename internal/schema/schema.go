@@ -126,6 +126,24 @@ func parse(t reflect.Type) (*Model, error) {
 			}
 			m.Auto = f
 		}
+		if f.Has("autoCreateTime") {
+			if err := checkAutoTime(t, f, "autoCreateTime"); err != nil {
+				return nil, err
+			}
+			if m.CreateTime != nil {
+				return nil, fmt.Errorf("goxdb: %s has more than one autoCreateTime field (%s, %s)", t, m.CreateTime.GoName, f.GoName)
+			}
+			m.CreateTime = f
+		}
+		if f.Has("autoUpdateTime") {
+			if err := checkAutoTime(t, f, "autoUpdateTime"); err != nil {
+				return nil, err
+			}
+			if m.UpdateTime != nil {
+				return nil, fmt.Errorf("goxdb: %s has more than one autoUpdateTime field (%s, %s)", t, m.UpdateTime.GoName, f.GoName)
+			}
+			m.UpdateTime = f
+		}
 		m.byName[f.Column] = f
 		lower := strings.ToLower(f.Column)
 		if _, dup := m.byLower[lower]; !dup {
@@ -278,6 +296,19 @@ func parseTag(tag string) (string, map[string]string) {
 		opts[k] = v
 	}
 	return name, opts
+}
+
+// checkAutoTime 校验自动时间戳字段可被写入：必须是 time.Time，
+// 否则框架无法在写入前赋值。
+func checkAutoTime(t reflect.Type, f *Field, opt string) error {
+	ft := f.Type
+	for ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	if ft != timeType {
+		return fmt.Errorf("goxdb: %s.%s has %s but is %s, want time.Time or *time.Time", t, f.GoName, opt, f.Type)
+	}
+	return nil
 }
 
 // SnakeCase 把 Go 标识符转为 snake_case，并保持缩写词完整：

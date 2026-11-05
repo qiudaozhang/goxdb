@@ -59,6 +59,7 @@ func (mysqlDialect) Features() dialect.Features {
 	return dialect.Features{
 		Upsert:              dialect.UpsertOnDuplicateKey,
 		OffsetRequiresLimit: true,
+		UpdateJoinStyle:     dialect.UpdateJoinInline,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"time"
 
 	"github.com/qiudaozhang/goxdb/dialect"
 	"github.com/qiudaozhang/goxdb/internal/schema"
@@ -21,11 +22,17 @@ var (
 // UpdateQ 是 UPDATE 语句，不可变。
 type UpdateQ[T any] struct {
 	ex      Executor
+	model   *schema.Model
 	table   Table
+	joins   []joinClause
 	sets    []Assignment
 	where   []Cond
-	allRows bool
-	err     error
+	touched []reflect.Value // 需要填充 autoUpdateTime 的可寻址模型（UpdateModel）
+	// autoCols 记录由 UpdateModel 从模型快照取值的列名。只有这些列会被自动时间戳刷新：
+	// 手动 Set 的值属于调用方的显式意图，必须保留。
+	autoCols map[string]bool
+	allRows  bool
+	err      error
 }
 
 // Update 构造针对模型 T 对应表的 UPDATE。只更新显式 Set 的列，绝不做零值推断。
@@ -38,6 +45,7 @@ func Update[T any](ex Executor) *UpdateQ[T] {
 		q.err = err
 		return q
 	}
+	q.model = m
 	q.table = Table{name: m.Table}
 	return q
 }
@@ -62,9 +70,12 @@ func UpdateModel[T any](ex Executor, v *T, cols ...Column) *UpdateQ[T] {
 	var fields []*schema.Field
 	if len(cols) == 0 {
 		for _, f := range m.Fields {
-			if !f.Has("pk") {
-				fields = append(fields, f)
+			// 主键不进 SET；autoCreateTime 列只在插入时写入，更新时保留原值。
+			// autoUpdateTime 保留在列表里，其值会在执行前被替换为当前时间。
+			if f.Has("pk") || f == m.CreateTime {
+				continue
 			}
+			fields = append(fields, f)
 		}
 	} else {
 		for _, c := range cols {
@@ -86,8 +97,13 @@ func UpdateModel[T any](ex Executor, v *T, cols ...Column) *UpdateQ[T] {
 	}
 	for _, f := range fields {
 		q.sets = append(q.sets, Assignment{col: C[any](q.table, f.Column), val: valNode{fieldValue(rv, f.Index)}})
+		if q.autoCols == nil {
+			q.autoCols = map[string]bool{}
+		}
+		q.autoCols[f.Column] = true
 	}
 	q.where = pkConds(q.table, m, rv)
+	q.touched = []reflect.Value{rv}
 	return q
 }
 
@@ -118,6 +134,23 @@ func (q *UpdateQ[T]) Where(conds ...Cond) *UpdateQ[T] {
 // AllRows 明确允许无 WHERE 的全表更新。
 func (q *UpdateQ[T]) AllRows() *UpdateQ[T] { c := q.clone(); c.allRows = true; return c }
 
+// Join 为多表 UPDATE 添加连接：MySQL 渲染为 UPDATE t JOIN u ON ... SET ...，
+// PostgreSQL 渲染为 UPDATE t SET ... FROM u WHERE ...。on 为连接条件。
+//
+//	xdb.Update[Order](db).
+//		Join(U, U.ID.EqCol(O.UserID)).
+//		Set(O.State.To("frozen")).
+//		Where(U.Status.Eq(0)).
+func (q *UpdateQ[T]) Join(src Source, on ...Cond) *UpdateQ[T] {
+	c := q.clone()
+	cond := And(on...)
+	if cond.IsZero() && c.err == nil {
+		c.err = errors.New("xdb: UPDATE ... JOIN requires an ON condition")
+	}
+	c.joins = append(slices.Clip(c.joins), joinClause{kind: "JOIN", src: src, on: cond})
+	return c
+}
+
 // SQL 按指定方言渲染。
 func (q *UpdateQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 	if q.err != nil {
@@ -132,14 +165,50 @@ func (q *UpdateQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 	}
 	b := newBuilder(d)
 	b.write("UPDATE ")
-	q.table.buildFrom(b)
+	q.buildTarget(b)
 	b.write(" SET ")
 	buildAssignments(b, q.table, q.sets)
-	if !where.IsZero() {
+	var extra []Cond
+	if len(q.joins) > 0 {
+		extra = q.buildJoinFrom(b)
+	}
+	if !where.IsZero() || len(extra) > 0 {
 		b.write(" WHERE ")
-		where.build(b)
+		And(append(append([]Cond{}, extra...), q.where...)...).build(b)
 	}
 	return b.result()
+}
+
+// buildTarget 写入 UPDATE 的目标表。MySQL 的多表 UPDATE 把 JOIN 直接接在表名后；
+// PostgreSQL 则是 UPDATE a SET ... FROM b。
+func (q *UpdateQ[T]) buildTarget(b *builder) {
+	q.table.buildFrom(b)
+	if len(q.joins) == 0 || b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
+		for _, j := range q.joins {
+			b.write(" " + j.kind + " ")
+			j.src.buildFrom(b)
+			b.write(" ON ")
+			j.on.build(b)
+		}
+	}
+}
+
+// buildJoinFrom 为 PostgreSQL 渲染 FROM 子句（多表 UPDATE）并返回需要并入 WHERE 的连接条件；
+// MySQL 已在 buildTarget 中内联 JOIN + ON，此处不输出。
+func (q *UpdateQ[T]) buildJoinFrom(b *builder) []Cond {
+	if b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
+		return nil
+	}
+	b.write(" FROM ")
+	on := make([]Cond, 0, len(q.joins))
+	for i, j := range q.joins {
+		if i > 0 {
+			b.write(", ")
+		}
+		j.src.buildFrom(b)
+		on = append(on, j.on)
+	}
+	return on
 }
 
 // ToSQL 按 Executor 的方言渲染。
@@ -152,14 +221,55 @@ func (q *UpdateQ[T]) ToSQL() (string, []any, error) {
 
 // Exec 执行更新，返回受影响行数。
 // 注意 MySQL 默认只统计值真正发生变化的行。
+//
+// 由 UpdateModel 构造且模型带 autoUpdateTime 字段时，会在执行前把该字段设为当前时间
+// 并加入 SET（若调用方显式 Set 过该列则尊重调用方的值）。
 func (q *UpdateQ[T]) Exec(ctx context.Context) (int64, error) {
-	return execStmt(ctx, q.ex, q.SQL)
+	return execStmt(ctx, q.ex, q.renderForExec)
+}
+
+// renderForExec 先填充 autoUpdateTime，再渲染；只用于执行路径，ToSQL / SQL 保持不变。
+func (q *UpdateQ[T]) renderForExec(d dialect.Dialect) (string, []any, error) {
+	q = q.stampUpdateTime()
+	return q.SQL(d)
+}
+
+// stampUpdateTime 返回一个副本：把 autoUpdateTime 列的赋值替换为当前时间并回写模型。
+// 已由调用方显式 Set 过该列时不干预（显式优先），但仍会把模型字段同步成该值。
+func (q *UpdateQ[T]) stampUpdateTime() *UpdateQ[T] {
+	if q.err != nil || q.model == nil || q.model.UpdateTime == nil || len(q.touched) == 0 {
+		return q
+	}
+	col := q.model.UpdateTime.Column
+	now := q.now()
+	idx := slices.IndexFunc(q.sets, func(a Assignment) bool {
+		return a.col != nil && a.col.colName() == col
+	})
+	if idx < 0 || !q.autoCols[col] {
+		// 该列不在本次 UPDATE 中，或由调用方显式 Set（显式意图优先）。
+		return q
+	}
+	c := q.clone()
+	c.sets = slices.Clone(q.sets)
+	c.sets[idx].val = valNode{now}
+	for _, row := range q.touched {
+		setZeroTime(row, q.model.UpdateTime, now, true)
+	}
+	return c
+}
+
+func (q *UpdateQ[T]) now() time.Time {
+	if q.ex != nil {
+		return q.ex.session().db.now()
+	}
+	return time.Now()
 }
 
 // DeleteQ 是 DELETE 语句，不可变。
 type DeleteQ[T any] struct {
 	ex      Executor
 	table   Table
+	joins   []joinClause
 	where   []Cond
 	allRows bool
 	err     error
@@ -208,6 +318,20 @@ func (q *DeleteQ[T]) Where(conds ...Cond) *DeleteQ[T] {
 // AllRows 明确允许无 WHERE 的全表删除。
 func (q *DeleteQ[T]) AllRows() *DeleteQ[T] { c := q.clone(); c.allRows = true; return c }
 
+// Join 为多表 DELETE 添加连接：MySQL 渲染为 DELETE t FROM t JOIN u ON ...，
+// PostgreSQL 渲染为 DELETE FROM t USING u WHERE ...。
+//
+//	xdb.Delete[Order](db).Join(U, U.ID.EqCol(O.UserID)).Where(U.Status.Eq(0))
+func (q *DeleteQ[T]) Join(src Source, on ...Cond) *DeleteQ[T] {
+	c := q.clone()
+	cond := And(on...)
+	if cond.IsZero() && c.err == nil {
+		c.err = errors.New("xdb: DELETE ... JOIN requires an ON condition")
+	}
+	c.joins = append(slices.Clip(c.joins), joinClause{kind: "JOIN", src: src, on: cond})
+	return c
+}
+
 // SQL 按指定方言渲染。
 func (q *DeleteQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 	if q.err != nil {
@@ -218,11 +342,39 @@ func (q *DeleteQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 		return "", nil, ErrMissingWhere
 	}
 	b := newBuilder(d)
-	b.write("DELETE FROM ")
-	q.table.buildFrom(b)
-	if !where.IsZero() {
+	var extra []Cond
+	if len(q.joins) == 0 {
+		b.write("DELETE FROM ")
+		q.table.buildFrom(b)
+	} else if b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
+		// MySQL：DELETE t FROM t JOIN u ON ...
+		b.write("DELETE ")
+		b.ident(q.table.qualifier())
+		b.write(" FROM ")
+		q.table.buildFrom(b)
+		for _, j := range q.joins {
+			b.write(" " + j.kind + " ")
+			j.src.buildFrom(b)
+			b.write(" ON ")
+			j.on.build(b)
+		}
+	} else {
+		// PostgreSQL：DELETE FROM t USING u WHERE <on>
+		b.write("DELETE FROM ")
+		q.table.buildFrom(b)
+		b.write(" USING ")
+		extra = make([]Cond, 0, len(q.joins))
+		for i, j := range q.joins {
+			if i > 0 {
+				b.write(", ")
+			}
+			j.src.buildFrom(b)
+			extra = append(extra, j.on)
+		}
+	}
+	if !where.IsZero() || len(extra) > 0 {
 		b.write(" WHERE ")
-		where.build(b)
+		And(append(extra, q.where...)...).build(b)
 	}
 	return b.result()
 }

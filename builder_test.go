@@ -251,6 +251,31 @@ func TestLockAndOffset(t *testing.T) {
 	}
 }
 
+func TestMultiTableUpdateDelete(t *testing.T) {
+	up := xdb.Update[Order](nil).
+		Join(U, U.ID.EqCol(O.CustomerID)).
+		Set(O.State.To("frozen")).
+		Where(U.Age.Gt(1))
+	golden(t, up,
+		"UPDATE `orders` JOIN `customers` ON `customers`.`id` = `orders`.`customer_id` SET `state` = ? WHERE `customers`.`age` > ?",
+		`UPDATE "orders" SET "state" = $1 FROM "customers" WHERE ("customers"."id" = "orders"."customer_id" AND "customers"."age" > $2)`,
+		"frozen", 1)
+
+	del := xdb.Delete[Order](nil).Join(U, U.ID.EqCol(O.CustomerID)).Where(U.Age.Gt(1))
+	golden(t, del,
+		"DELETE `orders` FROM `orders` JOIN `customers` ON `customers`.`id` = `orders`.`customer_id` WHERE `customers`.`age` > ?",
+		`DELETE FROM "orders" USING "customers" WHERE ("customers"."id" = "orders"."customer_id" AND "customers"."age" > $1)`,
+		1)
+
+	// 多表写仍然要遵守 WHERE 护栏。
+	if err := renderErr(xdb.Update[Order](nil).Join(U, U.ID.EqCol(O.CustomerID)).Set(O.State.To("x"))); !errors.Is(err, xdb.ErrMissingWhere) {
+		t.Fatalf("want ErrMissingWhere, got %v", err)
+	}
+	if err := renderErr(xdb.Update[Order](nil).Join(U).Set(O.State.To("x")).Where(U.Age.Gt(1))); err == nil {
+		t.Fatal("UPDATE JOIN without ON must fail")
+	}
+}
+
 func TestClauses(t *testing.T) {
 	golden(t, xdb.Select[Customer](nil, U.ID).From(U).Distinct().CrossJoin(O),
 		"SELECT DISTINCT `customers`.`id` FROM `customers` CROSS JOIN `orders`",
@@ -386,6 +411,32 @@ func TestInsertBatchAndBackfill(t *testing.T) {
 			t.Fatalf("row %d id=%d", i, c.ID)
 		}
 	}
+}
+
+func TestInsertSelect(t *testing.T) {
+	src := xdb.Select[Order](nil, O.CustomerID, O.Amount).From(O).Where(O.State.Eq("new"))
+	golden(t, xdb.InsertSelect[Order](nil, src).Columns(O.CustomerID, O.Amount),
+		"INSERT INTO `orders` (`customer_id`, `amount`) SELECT `orders`.`customer_id`, `orders`.`amount` FROM `orders` WHERE `orders`.`state` = ?",
+		`INSERT INTO "orders" ("customer_id", "amount") SELECT "orders"."customer_id", "orders"."amount" FROM "orders" WHERE "orders"."state" = $1`,
+		"new")
+
+	// 未显式给列时使用模型全部非自增列
+	golden(t, xdb.InsertSelect[Order](nil, src),
+		"INSERT INTO `orders` (`customer_id`, `amount`, `state`) SELECT `orders`.`customer_id`, `orders`.`amount` FROM `orders` WHERE `orders`.`state` = ?",
+		`INSERT INTO "orders" ("customer_id", "amount", "state") SELECT "orders"."customer_id", "orders"."amount" FROM "orders" WHERE "orders"."state" = $1`,
+		"new")
+
+	if err := renderErr(xdb.InsertSelect[Order](nil, nil)); err == nil {
+		t.Fatal("INSERT ... SELECT without source must fail")
+	}
+	// 列按名字映射到目标模型；名字不存在时报 ErrUnknownField，而源表列（跨表）是合法的。
+	if err := renderErr(xdb.InsertSelect[Order](nil, src).Columns(U.Name)); !errors.Is(err, xdb.ErrUnknownField) {
+		t.Fatalf("want ErrUnknownField, got %v", err)
+	}
+	golden(t, xdb.InsertSelect[Order](nil, src).Columns(O.CustomerID, O.Amount),
+		"INSERT INTO `orders` (`customer_id`, `amount`) SELECT `orders`.`customer_id`, `orders`.`amount` FROM `orders` WHERE `orders`.`state` = ?",
+		`INSERT INTO "orders" ("customer_id", "amount") SELECT "orders"."customer_id", "orders"."amount" FROM "orders" WHERE "orders"."state" = $1`,
+		"new")
 }
 
 // ---------- UPDATE / DELETE ----------

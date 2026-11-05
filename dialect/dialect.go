@@ -64,6 +64,16 @@ const (
 	UpsertOnDuplicateKey
 )
 
+// UpdateJoinStyle 是多表 UPDATE / DELETE 的语法风格。
+type UpdateJoinStyle uint8
+
+const (
+	// UpdateJoinInline：UPDATE a JOIN b ON ... SET ...（MySQL）。
+	UpdateJoinInline UpdateJoinStyle = iota + 1
+	// UpdateJoinFrom：UPDATE a SET ... FROM b WHERE ...（PostgreSQL）。
+	UpdateJoinFrom
+)
+
 // Features 描述方言支持的 SQL 特性。
 type Features struct {
 	// Returning：支持 INSERT/UPDATE/DELETE ... RETURNING。
@@ -74,6 +84,9 @@ type Features struct {
 	OffsetRequiresLimit bool
 	// ILike：原生支持 ILIKE；不支持时用 LOWER(x) LIKE LOWER(y) 模拟。
 	ILike bool
+	// UpdateJoinStyle：多表 UPDATE / DELETE 的语法风格（两者相同：MySQL 都是 JOIN 内联，
+	// PostgreSQL 都是 FROM / USING 子句）。
+	UpdateJoinStyle UpdateJoinStyle
 }
 
 // ErrorKind 是与数据库无关的服务端错误分类。

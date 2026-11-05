@@ -38,9 +38,10 @@ func (pgDialect) QuoteIdent(s string) string {
 
 func (pgDialect) Features() dialect.Features {
 	return dialect.Features{
-		Returning: true,
-		Upsert:    dialect.UpsertOnConflict,
-		ILike:     true,
+		Returning:       true,
+		Upsert:          dialect.UpsertOnConflict,
+		ILike:           true,
+		UpdateJoinStyle: dialect.UpdateJoinFrom,
 	}
 }
 

@@ -588,6 +588,14 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 - **锁与调试**：`ForUpdate / ForShare / NoWait / SkipLocked`（非事务内使用报 `ErrLockOutsideTx`），`ToSQL()`。
 - 所有构建器不可变：每个方法返回新对象，可放心复用基础查询。
 
+### M2 进行中（已完成部分）
+
+- **自动时间戳**：`xdb:"created_at,autoCreateTime"` / `xdb:"updated_at,autoUpdateTime"`。插入时填零值字段（显式赋值优先），`UpdateModel` 时把 `autoUpdateTime` 刷成当前时间并回写模型，`UpdateModel` 默认不再更新 `autoCreateTime` 列。时钟可用 `xdb.WithClock` 注入，便于测试与可预测写入。
+- **多表写操作**：`Update[T]().Join(...)` / `Delete[T]().Join(...)`，由 `Features.UpdateJoinStyle` 翻译：MySQL 为 `UPDATE a JOIN b ON ... SET` / `DELETE a FROM a JOIN b ON ...`，PostgreSQL 为 `UPDATE a SET ... FROM b WHERE` / `DELETE FROM a USING b WHERE`（连接条件下沉到 WHERE）。
+- **`INSERT ... SELECT`**：`xdb.InsertSelect[T](db, query).Columns(...)`；列按**列名**映射到目标模型（不像其他写入那样要求列属于目标表，因为归档表往往没有描述符），不填充自增与时间戳。
+- **基准测试**（`bench_test.go`）：纯渲染、结构体→INSERT 参数、单行/90 行扫描、标量扫描、元数据查找，并以 `database/sql` 直连作为基线，用于持续盯住反射开销。
+- 尚未完成：`goxdb gen` 代码生成、`Preload`、模型级回调。
+
 ### 测试
 
 - 金标准测试（`builder_test.go`）：**每个用例对 MySQL 与 PostgreSQL 两个方言都断言生成的 SQL 与参数**，缺一即失败（`golden` 在两个方言期望值均为空时直接报错，防止漏断言）。
@@ -599,3 +607,4 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 1. **MySQL upsert `DoNothing` 生成歧义列**：`AS new ON DUPLICATE KEY UPDATE name = name` 在存在行别名时 MySQL 报 `Error 1052: Column 'name' in field list is ambiguous`。修复为两侧都带表限定符：`` `customers`.`name` = `customers`.`name` ``。
 2. **`CAST` 的类型名不可移植**：MySQL 的 `CAST` 不接受 `BIGINT / INTEGER / BOOLEAN / VARCHAR / TIMESTAMP`，需映射为 `SIGNED / CHAR / DATETIME`。新增 `dialect.Dialect.CastType`，由方言吸收该差异；`xdb.Cast[int64]("BIGINT", x)` 在两个方言下都正确。
 3. **聚合结果类型**：`SUM(bigint)` 在 MySQL 返回 `DECIMAL`、在 PostgreSQL 返回 `NUMERIC`，直接扫入 `int64` 会失败。这是 SQL 语义而非框架缺陷，需用 `xdb.Cast[int64]("BIGINT", ...)` 显式转换——文档中已注明。
+

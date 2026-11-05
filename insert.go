@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"time"
 
 	"github.com/qiudaozhang/goxdb/dialect"
 	"github.com/qiudaozhang/goxdb/internal/schema"
@@ -193,6 +194,51 @@ func (q *InsertQ[T]) resolveCols() ([]*schema.Field, bool, error) {
 	return fields, backfill, nil
 }
 
+// stampTimes 在 INSERT 前填充 autoCreateTime / autoUpdateTime 字段。
+// 仅在对应字段属于本次插入列、且当前值为零值时填充：显式赋值优先。
+// 这需要可寻址的结构体，因此 Insert 要求传指针，InsertMany 在切片元素上就地修改。
+func (q *InsertQ[T]) stampTimes(fields []*schema.Field, now time.Time) {
+	for _, row := range q.rows {
+		for _, f := range []*schema.Field{q.model.CreateTime, q.model.UpdateTime} {
+			if f == nil || !slices.Contains(fields, f) {
+				continue
+			}
+			setZeroTime(row, f, now, false)
+		}
+	}
+}
+
+// setZeroTime 在字段可设置时赋值：force 为 false 时只填零值（显式赋值优先），
+// 为 true 时无条件覆盖。指针形式的字段会被分配。
+func setZeroTime(row reflect.Value, f *schema.Field, now time.Time, force bool) {
+	v, err := row.FieldByIndexErr(f.Index)
+	if err != nil || !v.CanSet() {
+		return
+	}
+	if f.Type.Kind() == reflect.Pointer {
+		if v.IsNil() || force {
+			p := reflect.New(f.Type.Elem())
+			p.Elem().Set(reflect.ValueOf(now))
+			v.Set(p)
+		}
+		return
+	}
+	if f.Type != reflect.TypeFor[time.Time]() {
+		return
+	}
+	if force || v.Interface().(time.Time).IsZero() {
+		v.Set(reflect.ValueOf(now))
+	}
+}
+
+// now 返回当前时间；无 Executor（纯渲染场景）时退化为 time.Now。
+func (q *InsertQ[T]) now() time.Time {
+	if q.ex != nil {
+		return q.ex.session().db.now()
+	}
+	return time.Now()
+}
+
 func (q *InsertQ[T]) chunkSize(d dialect.Dialect, ncols int) int {
 	n := max(d.MaxParams()/ncols, 1)
 	if q.batch > 0 {
@@ -367,6 +413,8 @@ func (q *InsertQ[T]) Exec(ctx context.Context) (int64, error) {
 	if len(q.rows) == 0 {
 		return 0, nil
 	}
+	// 只在真正执行时填充时间戳：ToSQL/SQL 是只读调试接口，不应修改模型。
+	q.stampTimes(fields, q.now())
 	d := q.ex.Dialect()
 	ret := q.returning(d, backfill)
 	size := q.chunkSize(d, len(fields))

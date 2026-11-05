@@ -2,8 +2,8 @@
 
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
-> 当前进度：**M0 地基**与 **M1 类型化查询构建器**已完成（免代码生成的列描述符、CRUD、条件组合、JOIN、
-> 子查询、CTE、Upsert、行锁、批量插入）。代码生成与关联预加载（M2）开发中，整体设计见 [docs/DESIGN.md](docs/DESIGN.md)。
+> 当前进度：**M0 地基** 与 **M1 类型化查询构建器** 已完成；**M2** 已完成自动时间戳、多表 UPDATE/DELETE、
+> INSERT…SELECT，代码生成与关联预加载开发中。整体设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 安装
 
@@ -155,6 +155,40 @@ db.Tx(ctx, func(ctx context.Context, tx *xdb.Tx) error {
 `ForUpdate` / `ForShare` 在非事务 `Executor` 上使用返回 `xdb.ErrLockOutsideTx`；`NoWait` / `SkipLocked` 须配合锁定子句。
 调试时用 `sql, args, err := q.ToSQL()`。
 
+### 多表更新 / 删除
+
+统一写法，方言自动翻译（MySQL 用 JOIN 内联，PostgreSQL 用 FROM / USING）：
+
+```go
+xdb.Update[Order](db).
+	Join(User, User.ID.EqCol(Order.UserID)).
+	Set(Order.State.To("frozen")).
+	Where(User.Status.Eq(0)).
+	Exec(ctx)
+
+xdb.Delete[Order](db).Join(User, User.ID.EqCol(Order.UserID)).Where(User.Status.Eq(0)).Exec(ctx)
+
+xdb.InsertSelect[ArchivedOrder](db,
+	xdb.Select[ArchivedOrder](nil, Order.UserID, Order.Amount, Order.State).
+		From(Order).Where(Order.State.Eq("old")),
+).Columns(Order.UserID, Order.Amount, Order.State).Exec(ctx)
+```
+
+### 自动时间戳
+
+```go
+type User struct {
+	ID        int64     `xdb:"id,pk,auto"`
+	Name      string    `xdb:"name"`
+	CreatedAt time.Time `xdb:"created_at,autoCreateTime"`
+	UpdatedAt time.Time `xdb:"updated_at,autoUpdateTime"`
+}
+```
+
+插入时只填充零值字段（显式赋值优先）；`UpdateModel` 会把 `updated_at` 刷新为当前时间并回写模型，
+且不会修改 `created_at`。需要写入特定时间就用 `Update[T]().Set(U.UpdatedAt.To(t))`。
+时钟可用 `xdb.WithClock(fn)` 注入，便于测试。
+
 ## 错误处理
 
 ```go
@@ -180,3 +214,8 @@ go test -tags integration ./tests/integration/...
 
 连接串可用 `XDB_MYSQL_DSN` / `XDB_PG_DSN` 覆盖。
 
+基准（假驱动，隔离网络与服务端，反映框架自身开销）：
+
+```bash
+go test -run XXX -bench . ./...
+```

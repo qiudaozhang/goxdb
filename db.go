@@ -37,6 +37,7 @@ type DB struct {
 
 	autoIncMu   sync.Mutex // 保护 autoIncStep
 	autoIncStep int64      // MySQL auto_increment_increment 缓存，0 表示未读取
+	now         func() time.Time
 }
 
 // Pool 是连接池配置，零值字段表示保持 database/sql 的默认值。
@@ -52,6 +53,7 @@ type options struct {
 	logger   *slog.Logger
 	strictTx bool
 	pool     *Pool
+	now      func() time.Time
 }
 
 // Option 配置 DB。
@@ -69,6 +71,10 @@ func WithPool(p Pool) Option { return func(o *options) { o.pool = &p } }
 // WithStrictTx 开启严格事务模式：当 context 处于某个事务中，却直接用 *DB
 // 执行语句时返回 ErrExecutorMisuse，而不仅是记录告警。建议在开发和测试环境开启。
 func WithStrictTx() Option { return func(o *options) { o.strictTx = true } }
+
+// WithClock 替换框架读取“当前时间”的方式，影响 autoCreateTime / autoUpdateTime 的填充。
+// 默认为 time.Now，测试中可注入固定时钟使写入结果可预测。
+func WithClock(now func() time.Time) Option { return func(o *options) { o.now = now } }
 
 // Open 按方言名打开数据库。方言需要先通过导入方言包注册，例如：
 //
@@ -99,6 +105,9 @@ func New(std *sql.DB, d dialect.Dialect, opts ...Option) *DB {
 	if o.logger == nil {
 		o.logger = slog.Default()
 	}
+	if o.now == nil {
+		o.now = time.Now
+	}
 	if p := o.pool; p != nil {
 		if p.MaxOpen > 0 {
 			std.SetMaxOpenConns(p.MaxOpen)
@@ -113,7 +122,7 @@ func New(std *sql.DB, d dialect.Dialect, opts ...Option) *DB {
 			std.SetConnMaxIdleTime(p.MaxIdleTime)
 		}
 	}
-	return &DB{std: std, d: d, hooks: o.hooks, logger: o.logger, strictTx: o.strictTx}
+	return &DB{std: std, d: d, hooks: o.hooks, logger: o.logger, strictTx: o.strictTx, now: o.now}
 }
 
 // Dialect 返回当前方言。
