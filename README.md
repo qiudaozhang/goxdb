@@ -3,7 +3,8 @@
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
 > 当前进度：**M0** 地基、**M1** 查询构建器、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
-> 多表写、INSERT…SELECT）已完成；**M3** 已支持窗口函数与软删除。设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
+> 多表写、INSERT…SELECT）、**M3**（窗口函数、软删除、方言扩展包）已完成。
+> 设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 安装
 
@@ -294,6 +295,36 @@ top, err := xdb.Select[RankedOrder](db, d.Star()).From(d).Where(xdb.C[int64](d, 
 
 可用：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead /
 FirstValue / LastValue / NthValue`，窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。
+
+### 方言专属能力
+
+通用 API 只覆盖可移植的 SQL。方言专属能力放在子包里，**显式 import = 明确表示这段代码不可移植**。
+
+```go
+import (
+	"github.com/qiudaozhang/goxdb/dialect/pg" // PostgreSQL：JSONB / 数组
+	"github.com/qiudaozhang/goxdb/dialect/my" // MySQL：JSON / 全文检索
+)
+```
+
+```go
+// PostgreSQL
+xdb.Query[Doc](db).Where(
+	pg.JSONB(D.Meta).Text("status").Eq("active"),
+	pg.JSONB(D.Meta).Field("a").Field("b").Text("c").Eq("x"),
+	pg.JSONB(D.Meta).HasKey("k"),
+	pg.JSONB(D.Meta).Contains(`{"a":1}`),
+	pg.Array(D.Tags).Any(xdb.V("red")),
+	pg.Array(D.Tags).Contains(xdb.V("a"), xdb.V("b")),
+)
+
+// MySQL
+xdb.Query[Doc](db).Where(
+	my.JSON(D.Meta).Text("status").Eq("active"),
+	my.JSON(D.Meta).Field("a").Index(0).Text("name").Eq("x"),
+	my.Match(D.Body, "hello", "IN BOOLEAN MODE"),
+)
+```
 
 ### 软删除
 

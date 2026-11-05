@@ -592,7 +592,10 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 
 - **窗口函数**：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead / FirstValue / LastValue / NthValue`，以及窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。窗口用 `xdb.Win().PartitionBy(...).OrderBy(...).Frame(...)` 描述；框架语法在 MySQL 8 与 PostgreSQL 之间一致，故不作方言翻译。窗口函数只能出现在投影与 ORDER BY 中，过滤需用派生表包一层（测试里覆盖了「每个客户金额最大的订单」这一典型写法）。
 - **软删除**：字段加 `xdb:"deleted_at,softDelete"` 后，`Query / Select / 子查询`自动附加 `<col> IS NULL`，`Delete` 渲染为 `UPDATE ... SET <col> = CURRENT_TIMESTAMP`。`Unscoped()` 用于绕过过滤（查询）或真正物理删除（删除）。软删除列属于**源表**，因此从 `from` 的模型推导而非结果类型——`xdb.Select[int64](nil, P.ID).From(P)` 也能正确过滤；手写的 `xdb.T("posts")` 没有模型信息，不会自动过滤（行为显式）。
-- 待完成：读写分离、方言扩展包（JSON / 数组）、pgx 原生连接、DB-first 反向生成模型。
+- **方言扩展包**：`dialect/pg`（JSONB 路径 `->` / `->>`、`@>`、`jsonb_exists`、数组 `ANY / @> / && / array_length`）与 `dialect/my`（`JSON_EXTRACT` / `JSON_UNQUOTE` / `JSON_CONTAINS_PATH` / `JSON_CONTAINS`、`MATCH ... AGAINST`）。放在子包里，用户显式 import，**不污染通用 API**——用了方言专属特性在 import 上一眼可见。
+  - MySQL 的 `??` 占位符转义对 `?` 操作符不友好，因此 `HasKey` 改用等价的 `jsonb_exists()` 函数。
+- **`xdb.Lit[T]`**：把一个原样输出的 SQL 片段包装为表达式（不做参数绑定）。方言扩展包用它内联固定语法；因为它绕过参数绑定，文档中明确要求只用于代码常量，禁止传入用户输入。
+- 待完成：读写分离、pgx 原生连接、DB-first 反向生成模型。
 
 ### M2（已完成）
 
