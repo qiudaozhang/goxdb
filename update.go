@@ -276,7 +276,7 @@ func (q *UpdateQ[T]) stampUpdateTime() *UpdateQ[T] {
 
 func (q *UpdateQ[T]) now() time.Time {
 	if q.ex != nil {
-		return q.ex.session().db.now()
+		return q.ex.session(false).db.now()
 	}
 	return time.Now()
 }

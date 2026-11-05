@@ -17,7 +17,9 @@ import (
 // 从而保证所有执行路径都经过 Hook、错误归一化与事务状态检查。
 type Executor interface {
 	Dialect() dialect.Dialect
-	session() session
+	// session 返回本次操作的执行上下文。readOnly 为 true 表示这是只读查询，
+	// 读写分离时可能路由到只读副本；事务始终使用主库。
+	session(readOnly bool) session
 }
 
 type sqlConn interface {
@@ -48,7 +50,7 @@ func (s session) enter(ctx context.Context) (release func(), err error) {
 
 // doExec 执行已渲染完成（占位符为方言原生形式）的语句。
 func doExec(ctx context.Context, ex Executor, q string, a []any) (sql.Result, error) {
-	s := ex.session()
+	s := ex.session(false)
 	release, err := s.enter(ctx)
 	if err != nil {
 		return nil, err
@@ -69,9 +71,10 @@ func doExec(ctx context.Context, ex Executor, q string, a []any) (sql.Result, er
 	return res, err
 }
 
-// doQuery 执行已渲染完成的查询。
-func doQuery(ctx context.Context, ex Executor, q string, a []any) (*Rows, error) {
-	s := ex.session()
+// doQuery 执行已渲染完成的查询。readOnly 为 true 时可能路由到只读副本；
+// INSERT/UPDATE/DELETE ... RETURNING 虽然返回结果集，但属于写操作，必须传 false。
+func doQuery(ctx context.Context, ex Executor, q string, a []any, readOnly bool) (*Rows, error) {
+	s := ex.session(readOnly)
 	release, err := s.enter(ctx)
 	if err != nil {
 		return nil, err

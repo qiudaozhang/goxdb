@@ -32,7 +32,7 @@ func (s stmt) query(ctx context.Context) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	return doQuery(ctx, s.ex, q, a)
+	return doQuery(ctx, s.ex, q, a, true)
 }
 
 func (s stmt) exec(ctx context.Context) (sql.Result, error) {

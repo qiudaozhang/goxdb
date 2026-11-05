@@ -595,7 +595,8 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 - **方言扩展包**：`dialect/pg`（JSONB 路径 `->` / `->>`、`@>`、`jsonb_exists`、数组 `ANY / @> / && / array_length`）与 `dialect/my`（`JSON_EXTRACT` / `JSON_UNQUOTE` / `JSON_CONTAINS_PATH` / `JSON_CONTAINS`、`MATCH ... AGAINST`）。放在子包里，用户显式 import，**不污染通用 API**——用了方言专属特性在 import 上一眼可见。
   - MySQL 的 `??` 占位符转义对 `?` 操作符不友好，因此 `HasKey` 改用等价的 `jsonb_exists()` 函数。
 - **`xdb.Lit[T]`**：把一个原样输出的 SQL 片段包装为表达式（不做参数绑定）。方言扩展包用它内联固定语法；因为它绕过参数绑定，文档中明确要求只用于代码常量，禁止传入用户输入。
-- 待完成：读写分离、pgx 原生连接、DB-first 反向生成模型。
+- **读写分离**：`xdb.WithReplica(replicaPool)`。`Executor.session(readOnly bool)` 区分意图：只读查询（All / One / Iter / Count / Exists / Pluck）走副本，写操作与事务始终走主库。`INSERT ... RETURNING` 虽然返回结果集，但按写操作处理（`doQuery(..., readOnly=false)`）——这是个容易写错的地方，测试专门覆盖。`xdb.Primary(db)` 提供强一致读的逃生通道；同一连接池同时作为主库与副本时自动忽略副本配置。
+- 待完成：pgx 原生连接、DB-first 反向生成模型。
 
 ### M2（已完成）
 

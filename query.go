@@ -340,7 +340,7 @@ func (q *Q[T]) stmt() stmt {
 	return stmt{
 		ex: q.ex,
 		render: func(d dialect.Dialect) (string, []any, error) {
-			if q.c.lock.mode != "" && q.ex.session().tx == nil {
+			if q.c.lock.mode != "" && q.ex.session(false).tx == nil {
 				return "", nil, ErrLockOutsideTx
 			}
 			return q.SQL(d)

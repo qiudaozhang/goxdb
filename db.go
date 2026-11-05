@@ -19,6 +19,7 @@ package xdb
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -29,7 +30,9 @@ import (
 
 // DB 是数据库句柄，内部持有连接池，可并发使用，应在整个程序生命周期中复用。
 type DB struct {
-	std      *sql.DB
+	std *sql.DB
+	// replica 是只读副本连接池；为 nil 时所有读也走主库。
+	replica  *sql.DB
 	d        dialect.Dialect
 	hooks    []Hook
 	logger   *slog.Logger
@@ -54,7 +57,17 @@ type options struct {
 	strictTx bool
 	pool     *Pool
 	now      func() time.Time
+	replica  *sql.DB
 }
+
+// WithReplica 配置只读副本连接池，用于读写分离。
+//
+// 只读查询（All / One / Iter / Count / Exists / Pluck、以及 Raw 的查询）会走副本；
+// 写操作与事务**始终**走主库——事务一旦开启就固定在主库，避免读到不一致的快照。
+//
+// 主从延迟意味着刚写入的数据可能立刻读不到。需要强一致读时，在事务中读取
+// （事务固定在主库），或用 xdb.Primary(db) 显式指定主库执行器。
+func WithReplica(std *sql.DB) Option { return func(o *options) { o.replica = std } }
 
 // Option 配置 DB。
 type Option func(*options)
@@ -122,7 +135,10 @@ func New(std *sql.DB, d dialect.Dialect, opts ...Option) *DB {
 			std.SetConnMaxIdleTime(p.MaxIdleTime)
 		}
 	}
-	return &DB{std: std, d: d, hooks: o.hooks, logger: o.logger, strictTx: o.strictTx, now: o.now}
+	if o.replica != nil && o.replica == std {
+		o.replica = nil // 同一个池没有必要区分
+	}
+	return &DB{std: std, replica: o.replica, d: d, hooks: o.hooks, logger: o.logger, strictTx: o.strictTx, now: o.now}
 }
 
 // Dialect 返回当前方言。
@@ -137,7 +153,36 @@ func (db *DB) Ping(ctx context.Context) error { return db.std.PingContext(ctx) }
 // Stats 返回连接池统计。
 func (db *DB) Stats() sql.DBStats { return db.std.Stats() }
 
-// Close 关闭连接池。
-func (db *DB) Close() error { return db.std.Close() }
+// Close 关闭主库与副本连接池（副本未配置时只关主库）。
+func (db *DB) Close() error {
+	if db.replica != nil {
+		return errors.Join(db.std.Close(), db.replica.Close())
+	}
+	return db.std.Close()
+}
 
-func (db *DB) session() session { return session{db: db, conn: db.std} }
+// session 按操作类型选择连接池：只读查询优先走副本，写与事务始终走主库。
+func (db *DB) session(readOnly bool) session {
+	if readOnly && db.replica != nil {
+		return session{db: db, conn: db.replica}
+	}
+	return session{db: db, conn: db.std}
+}
+
+// Replica 返回只读副本连接池（未配置时为 nil）。
+func (db *DB) Replica() *sql.DB { return db.replica }
+
+// Primary 返回主库连接池。
+func (db *DB) Primary() *sql.DB { return db.std }
+
+// primaryExecutor 强制所有操作走主库的 Executor 包装。
+type primaryExecutor struct{ *DB }
+
+func (p primaryExecutor) session(bool) session {
+	return session{db: p.DB, conn: p.DB.std}
+}
+
+// Primary 返回一个强制走主库的执行器，用于读写分离下的强一致读：
+//
+//	n, err := xdb.One[int64](ctx, xdb.Query[int64](xdb.Primary(db), ...))
+func Primary(db *DB) Executor { return primaryExecutor{db} }

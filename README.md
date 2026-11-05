@@ -3,7 +3,7 @@
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
 > 当前进度：**M0** 地基、**M1** 查询构建器、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
-> 多表写、INSERT…SELECT）、**M3**（窗口函数、软删除、方言扩展包）已完成。
+> 多表写、INSERT…SELECT）、**M3**（窗口函数、软删除、方言扩展包、读写分离）已完成。
 > 设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 安装
@@ -344,6 +344,25 @@ xdb.Delete[Post](db).Unscoped().Where(P.ID.Eq(1)).Exec(ctx) // → 真正物理�
 
 软删除过滤对子查询同样生效。它由**源表**推导，所以 `xdb.Select[int64](nil, P.ID).From(P)` 也会过滤；
 手写的 `xdb.T("posts")` 不含模型信息，不会自动过滤。
+
+### 读写分离
+
+```go
+db, err := xdb.Open("postgres", primaryDSN,
+	xdb.WithReplica(replicaPool), // *sql.DB，可为 nil
+)
+
+xdb.Query[User](db).All(ctx)            // → 副本
+xdb.Query[User](db).Count(ctx)          // → 副本
+xdb.Insert(db, &u).Exec(ctx)            // → 主库
+db.Tx(ctx, func(...) error { ... })     // → 主库（事务固定在主库）
+
+// 强一致读：显式走主库
+xdb.Query[User](xdb.Primary(db)).Where(U.ID.Eq(u.ID)).One(ctx)
+```
+
+`INSERT ... RETURNING` 虽返回结果集，但按写操作路由到主库。主从延迟意味着刚写入的数据可能读不到，
+需要强一致时用事务或 `xdb.Primary(db)`。
 
 ## 错误处理
 

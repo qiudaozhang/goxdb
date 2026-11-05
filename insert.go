@@ -234,7 +234,7 @@ func setZeroTime(row reflect.Value, f *schema.Field, now time.Time, force bool) 
 // now 返回当前时间；无 Executor（纯渲染场景）时退化为 time.Now。
 func (q *InsertQ[T]) now() time.Time {
 	if q.ex != nil {
-		return q.ex.session().db.now()
+		return q.ex.session(false).db.now()
 	}
 	return time.Now()
 }
@@ -461,7 +461,7 @@ func (q *InsertQ[T]) Exec(ctx context.Context) (int64, error) {
 }
 
 func (q *InsertQ[T]) execReturning(ctx context.Context, sqlText string, args []any, chunk []reflect.Value, ret *schema.Field) (int64, error) {
-	rows, err := doQuery(ctx, q.ex, sqlText, args)
+	rows, err := doQuery(ctx, q.ex, sqlText, args, false)
 	if err != nil {
 		return 0, err
 	}
@@ -497,7 +497,7 @@ func (q *InsertQ[T]) backfillLastID(ctx context.Context, res interface{ LastInse
 	}
 	step := int64(1)
 	if len(chunk) > 1 {
-		if step, err = q.ex.session().db.autoIncrementStep(ctx, q.ex); err != nil {
+		if step, err = q.ex.session(false).db.autoIncrementStep(ctx, q.ex); err != nil {
 			return err
 		}
 	}

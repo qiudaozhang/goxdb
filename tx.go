@@ -63,7 +63,9 @@ type Tx struct {
 // Dialect 返回方言。
 func (t *Tx) Dialect() dialect.Dialect { return t.db.d }
 
-func (t *Tx) session() session { return session{db: t.db, conn: t.std, tx: t} }
+// session 始终使用事务自己的连接（在主库上），readOnly 参数被忽略：
+// 事务一旦开启就固定在主库，避免读到不一致的快照。
+func (t *Tx) session(bool) session { return session{db: t.db, conn: t.std, tx: t} }
 
 // ---------- 事务选项 ----------
 
@@ -310,7 +312,7 @@ func (db *DB) Begin(ctx context.Context, opts ...TxOption) (*ManualTx, error) {
 // Dialect 返回方言。
 func (m *ManualTx) Dialect() dialect.Dialect { return m.t.Dialect() }
 
-func (m *ManualTx) session() session { return m.t.session() }
+func (m *ManualTx) session(readOnly bool) session { return m.t.session(readOnly) }
 
 // Tx 开启嵌套事务，语义同 Tx.Tx。
 func (m *ManualTx) Tx(ctx context.Context, fn TxFunc, opts ...TxOption) error {
