@@ -5,7 +5,9 @@ package schema
 import (
 	"database/sql"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -282,6 +284,9 @@ func walk(t reflect.Type, index []int, prefix string, depth int, out *[]candidat
 			continue
 		}
 		name, opts := parseTag(tag)
+		if err := checkOptions(opts); err != nil {
+			return fmt.Errorf("goxdb: %s.%s: %w", t, sf.Name, err)
+		}
 		if rel, isRel := opts["rel"]; isRel {
 			if !sf.IsExported() {
 				continue
@@ -388,6 +393,55 @@ func parseTag(tag string) (string, map[string]string) {
 		opts[k] = v
 	}
 	return name, opts
+}
+
+// columnOptions / relationOptions 是列字段与关联字段可用的标签选项。
+// 拼错的选项（如 autoIncrement、softdelete）若被静默忽略，主键回填、软删除等会悄悄失效，
+// 因此未知选项一律报错。
+var (
+	columnOptions   = []string{"pk", "auto", "autoCreateTime", "autoUpdateTime", "softDelete"}
+	relationOptions = []string{"rel", "fk"}
+)
+
+// CheckTag 校验 xdb 标签的选项，供不经反射的代码生成复用同一规则。"-" 与空标签合法。
+func CheckTag(tag string) error {
+	if tag == "-" {
+		return nil
+	}
+	_, opts := parseTag(tag)
+	return checkOptions(opts)
+}
+
+// checkOptions 校验字段的标签选项都是已知选项，且列选项与关联选项没有混用。
+// 返回的错误不带字段位置，由调用方补上。
+func checkOptions(opts map[string]string) error {
+	allowed, kind := columnOptions, "column"
+	if _, ok := opts["rel"]; ok {
+		allowed, kind = relationOptions, "relation"
+	}
+	for _, k := range slices.Sorted(maps.Keys(opts)) {
+		if slices.Contains(allowed, k) {
+			continue
+		}
+		known := slices.Contains(columnOptions, k) || slices.Contains(relationOptions, k)
+		if known {
+			return fmt.Errorf("tag option %q is not allowed on a %s field (allowed: %s)",
+				k, kind, strings.Join(allowed, ", "))
+		}
+		hint := ""
+		for _, o := range append(slices.Clip(columnOptions), relationOptions...) {
+			if strings.EqualFold(o, k) {
+				hint = fmt.Sprintf("; did you mean %q?", o)
+				break
+			}
+		}
+		if hint == "" && strings.EqualFold(k, "autoIncrement") {
+			hint = `; did you mean "auto"?`
+		}
+		return fmt.Errorf("unknown tag option %q (allowed on a %s field: %s)%s",
+			k, kind, strings.Join(allowed, ", "), hint)
+	}
+	return nil
 }
 
 // newRelation 由字段与标签构造关联定义。

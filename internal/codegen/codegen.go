@@ -461,6 +461,16 @@ func (w *walker) collect(st *ast.StructType, imports map[string]string, sel, pat
 		if hasTag && tag == "-" {
 			continue
 		}
+		if hasTag {
+			// 与运行时同一规则：拼错的选项在生成阶段就报错，而不是等到第一次查询
+			if err := schema.CheckTag(tag); err != nil && w.err == nil {
+				name := embeddedTypeName(field.Type)
+				if len(field.Names) > 0 {
+					name = field.Names[0].Name
+				}
+				w.err = fmt.Errorf("field %s%s: %w", sel, name, err)
+			}
+		}
 		var goName string
 		if len(field.Names) == 0 {
 			// 匿名（嵌入）字段：与 schema.walk 一致——标签里没写列名的结构体递归展开，

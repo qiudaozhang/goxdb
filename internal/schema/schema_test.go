@@ -215,3 +215,49 @@ func TestEmbedPtrsNested(t *testing.T) {
 	}
 	o.X = 1 // 不应 panic
 }
+
+func TestUnknownTagOption(t *testing.T) {
+	type typo struct {
+		ID int64 `xdb:"id,pk,autoIncrement"`
+	}
+	type badCase struct {
+		DeletedAt *time.Time `xdb:"deleted_at,softdelete"`
+	}
+	type colWithFK struct {
+		UserID int64 `xdb:"user_id,fk:x"`
+	}
+	type relWithPK struct {
+		ID    int64    `xdb:"id,pk"`
+		Items []*typo2 `xdb:"rel:has_many,fk:owner_id,pk"`
+	}
+	type documented struct {
+		ID        int64      `xdb:"id,pk,auto"`
+		CreatedAt time.Time  `xdb:"created_at,autoCreateTime"`
+		UpdatedAt time.Time  `xdb:"updated_at,autoUpdateTime"`
+		DeletedAt *time.Time `xdb:"deleted_at,softDelete"`
+		Items     []*typo2   `xdb:"rel:has_many,fk:owner_id"`
+	}
+	for _, c := range []struct {
+		typ  reflect.Type
+		want string // 空表示应当成功
+	}{
+		{reflect.TypeFor[typo](), `unknown tag option "autoIncrement" (allowed on a column field: pk, auto, autoCreateTime, autoUpdateTime, softDelete); did you mean "auto"?`},
+		{reflect.TypeFor[badCase](), `did you mean "softDelete"?`},
+		{reflect.TypeFor[colWithFK](), `tag option "fk" is not allowed on a column field`},
+		{reflect.TypeFor[relWithPK](), `tag option "pk" is not allowed on a relation field (allowed: rel, fk)`},
+		{reflect.TypeFor[documented](), ""},
+	} {
+		_, err := Of(c.typ)
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s: unexpected error %v", c.typ, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("%s: got %v, want error containing %q", c.typ, err, c.want)
+		}
+	}
+}
+
+type typo2 struct {
+	ID      int64 `xdb:"id,pk"`
+	OwnerID int64 `xdb:"owner_id"`
+}

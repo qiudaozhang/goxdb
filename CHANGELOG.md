@@ -3,6 +3,20 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 `v0.x` 阶段的次版本号升级可能包含不兼容变更，届时会在「不兼容变更」一节列出迁移方法。
 
+## [Unreleased]
+
+### 不兼容变更
+
+- 结构体标签中的未知选项改为报错（原先被静默忽略）。例如 `xdb:"id,pk,autoIncrement"` 原先等于没有 `auto`，
+  插入后主键不会回填；PostgreSQL 上还会把 `id` 写成 0。现在首次使用该模型时返回错误，`goxdb` 生成代码时也报错，
+  大小写写错会提示正确写法。迁移：按错误信息改成合法选项（`pk`、`auto`、`autoCreateTime`、`autoUpdateTime`、
+  `softDelete`，关联字段 `rel`、`fk`），或删掉不起作用的选项（如 `unique`）。
+
+### 文档
+
+- README 新增标签选项表；pkg.go.dev 上新增可运行示例（查询构建、动态条件、事务、upsert、错误判断）。
+- 新增 GitHub Actions CI（单元测试 + MySQL / PostgreSQL 集成测试）。
+
 ## [v0.1.1] - 2026-11-05
 
 事务正确性修复，建议所有 v0.1.0 用户升级（无 API 变更）。
@@ -84,5 +98,6 @@
   `timetz` / `interval` 映射为驱动真正能扫描进去的类型。
 - 手动事务 `Commit` 失败后会回滚并归还连接。
 
+[Unreleased]: https://github.com/qiudaozhang/goxdb/compare/v0.1.1...HEAD
 [v0.1.1]: https://github.com/qiudaozhang/goxdb/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/qiudaozhang/goxdb/releases/tag/v0.1.0

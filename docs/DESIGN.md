@@ -71,7 +71,7 @@ package model
 type User struct {
     ID        int64     `xdb:"id,pk,auto"`
     Name      string    `xdb:"name"`
-    Email     string    `xdb:"email,unique"`
+    Email     string    `xdb:"email"`
     Age       int       `xdb:"age"`
     Status    int8      `xdb:"status"`
     CreatedAt time.Time `xdb:"created_at,autoCreateTime"`
@@ -93,6 +93,9 @@ type Order struct {
 ```
 
 - 支持嵌入结构体、`sql.Scanner` / `driver.Valuer`、`sql.Null[T]`、指针表示可空。
+- 标签选项是封闭集合：列字段 `pk` / `auto` / `autoCreateTime` / `autoUpdateTime` / `softDelete`，关联字段 `rel` / `fk`。
+  唯一约束、长度等 DDL 信息不属于标签（框架不建表）。未知选项在 `schema.Of` 与 `goxdb` 生成时报错，并对大小写写错给出提示，
+  因为被静默忽略的 `autoIncrement` 会让主键回填悄悄失效。
 - 不需要实现任何接口，`TableName()` 可选（默认 snake_case 复数）。
 
 ### 3.2 代码生成类型化描述符

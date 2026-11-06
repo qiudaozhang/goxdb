@@ -42,6 +42,21 @@ n, err := xdb.One[int64](ctx, xdb.Raw(db, "SELECT COUNT(*) FROM users"))
 for u, err := range xdb.Iter[User](ctx, xdb.Raw(db, "SELECT * FROM users")) { ... }
 ```
 
+### 结构体标签
+
+`xdb:"列名,选项..."`。列名省略时取字段名的 snake_case；导出字段即使没有标签也是列，`xdb:"-"` 排除。
+
+| 选项 | 用于 | 含义 |
+|---|---|---|
+| `pk` | 列 | 主键（`UpdateModel` / `DeleteModel` 按它定位行；复合主键写多个） |
+| `auto` | 列 | 自增列：插入时不写入，插入后回填（每个模型至多一个） |
+| `autoCreateTime` | 时间列 | 插入时若为零值，填当前时间 |
+| `autoUpdateTime` | 时间列 | 插入时若为零值，填当前时间；`UpdateModel` 时刷新为当前时间 |
+| `softDelete` | 可空列（通常 `*time.Time`） | 软删除标记，见[软删除](#软删除) |
+| `rel:has_many` / `rel:has_one` / `rel:belongs_to` | 关联字段 | 关联，非列，配合 `fk:外键列`，见 `Preload` |
+
+未知选项（如把 `auto` 写成 `autoIncrement`）在首次使用模型、以及 `goxdb` 生成代码时报错，不会被静默忽略。
+
 ## 事务
 
 ```go

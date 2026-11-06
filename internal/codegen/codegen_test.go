@@ -223,3 +223,36 @@ type Item struct {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// 拼错的标签选项在生成阶段就报错，与运行时 schema 同一规则。
+func TestUnknownTagOption(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{`package model
+
+type Item struct {
+	ID int64 ` + "`xdb:\"id,pk,autoIncrement\"`" + `
+}
+`, `Item: field ID: unknown tag option "autoIncrement" (allowed on a column field: pk, auto, autoCreateTime, autoUpdateTime, softDelete); did you mean "auto"?`},
+		{`package model
+
+type Item struct {
+	ID        int64  ` + "`xdb:\"id,pk,auto\"`" + `
+	DeletedAt *int64 ` + "`xdb:\"deleted_at,softdelete\"`" + `
+}
+`, `Item: field DeletedAt: unknown tag option "softdelete"`},
+		{`package model
+
+type Item struct {
+	ID    int64   ` + "`xdb:\"id,pk\"`" + `
+	Owner *Item   ` + "`xdb:\"rel:belongs_to,fk:owner_id,pk\"`" + `
+}
+`, `Item: field Owner: tag option "pk" is not allowed on a relation field`},
+	} {
+		dir := t.TempDir()
+		writeModel(t, dir, c.src)
+		_, _, err := ParseDir(dir)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("err = %v, want %q", err, c.want)
+		}
+	}
+}
