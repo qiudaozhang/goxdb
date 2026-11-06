@@ -3,7 +3,9 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 `v0.x` 阶段的次版本号升级可能包含不兼容变更，届时会在「不兼容变更」一节列出迁移方法。
 
-## [Unreleased]
+## [v0.2.0] - 2026-11-05
+
+一处不兼容变更（拼错的标签选项改为报错）与一处修复（自动时间戳精度）。升级前请确认模型标签只使用下列合法选项。
 
 ### 不兼容变更
 
@@ -19,7 +21,7 @@
   （`==` / `Equal` 比较、缓存键、乐观锁条件都会受影响）。`WithClock` 注入的时钟同样截断。
   注意 MySQL 不带小数位的 `DATETIME` 会四舍五入到秒，需要精确往返请用 `DATETIME(6)`。
 
-### 文档
+### 文档与工程
 
 - README 新增标签选项表；pkg.go.dev 上新增可运行示例（查询构建、动态条件、事务、upsert、错误判断）。
 - 新增 GitHub Actions CI（单元测试 + MySQL / PostgreSQL 集成测试）。
@@ -105,6 +107,6 @@
   `timetz` / `interval` 映射为驱动真正能扫描进去的类型。
 - 手动事务 `Commit` 失败后会回滚并归还连接。
 
-[Unreleased]: https://github.com/qiudaozhang/goxdb/compare/v0.1.1...HEAD
+[v0.2.0]: https://github.com/qiudaozhang/goxdb/compare/v0.1.1...v0.2.0
 [v0.1.1]: https://github.com/qiudaozhang/goxdb/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/qiudaozhang/goxdb/releases/tag/v0.1.0
