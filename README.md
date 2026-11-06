@@ -487,7 +487,7 @@ Upsert、事务、并发读写、纯渲染），MySQL 与 PostgreSQL 各一轮�
 - **真实往返主导一切**：PostgreSQL 上 xdb 与最优实现普遍相差 5% 以内
 - **纯 SQL 生成**：xdb 0.60μs，与 bun 同档，比 GORM（1.20μs）快一倍
 - **分配**：单行读 55 次（优化前 80）；批量读 459 次，低于 sqlx 的 635 与 GORM 的 972
-- **唯一短板**：JOIN 聚合慢 16–25%，因为表达式树多一层遍历
+- **JOIN 聚合**：此前测得慢 16–25%，查明是 MySQL 统计信息过期造成的假象；基准灌数后显式 `ANALYZE`，修正后与 sqlx / bun 同档
 - **MySQL 上 bun 快 1.5–2 倍**来自驱动参数插值，加 `interpolateParams=true` 后四者持平
 - **PG 上 bun 插入慢 2 倍**来自它的 `RETURNING *` 设计
 - **`goxdb gen` 零反射扫描**：隔离测量下扫描本身快 19%，真实库里批量读约 4%

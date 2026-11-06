@@ -142,7 +142,28 @@ func createTable(ctx context.Context, db *sql.DB, b backend) error {
 	if err := seedOrdersData(ctx, db, b); err != nil {
 		return err
 	}
-	return resetIdentity(ctx, db, b)
+	if err := resetIdentity(ctx, db, b); err != nil {
+		return err
+	}
+	return analyzeTables(ctx, db, b)
+}
+
+// analyzeTables 刷新优化器统计信息。
+//
+// 灌数与每个场景后的清理都会让统计信息过期。MySQL 曾因此把 JOIN 聚合估成
+// 「30 个用户、1 个订单」，选出慢 3 倍的计划；统计何时被后台自动刷新
+// 是随机的，于是谁恰好跑在刷新之后谁就快（bun 0.45ms vs 其余 1.4ms，
+// GORM 三次里有一次 0.6ms）。显式 ANALYZE 让每个框架面对同一个计划。
+func analyzeTables(ctx context.Context, db *sql.DB, b backend) error {
+	q := "ANALYZE " + tableName + ", " + orderTable
+	if b.name == "mysql" {
+		q = "ANALYZE TABLE " + tableName + ", " + orderTable
+	}
+	rows, err := db.QueryContext(ctx, q) // MySQL 的 ANALYZE TABLE 返回结果集
+	if err != nil {
+		return err
+	}
+	return rows.Close()
 }
 
 // seedUsersData 一次多值 INSERT 灌入 users，避免逐行往返拖慢启动。

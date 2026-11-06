@@ -222,6 +222,9 @@ func cleanup(ctx context.Context, e *env) {
 	if err := resetIdentity(ctx, e.std, e.b); err != nil {
 		e.logf("reset identity: %v", err)
 	}
+	if err := analyzeTables(ctx, e.std, e.b); err != nil {
+		e.logf("analyze: %v", err)
+	}
 }
 
 func (e *env) logf(format string, args ...any) {
