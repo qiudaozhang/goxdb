@@ -135,8 +135,14 @@ func GoType(mysqlType string, nullable bool) reflect.Type {
 	case "binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob",
 		"bit", "geometry", "point", "linestring", "polygon":
 		t = reflect.TypeFor[[]byte]()
-	case "date", "datetime", "timestamp", "time", "year":
+	case "date", "datetime", "timestamp":
 		t = reflect.TypeFor[time.Time]()
+	case "time":
+		// TIME 是时长（可超过 24 小时、可为负），驱动的 parseTime 不处理它，
+		// 扫进 time.Time 会失败；按文本承载。
+		t = reflect.TypeFor[string]()
+	case "year":
+		t = reflect.TypeFor[int16]()
 	default:
 		t = reflect.TypeFor[string]()
 	}

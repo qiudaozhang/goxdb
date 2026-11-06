@@ -129,16 +129,22 @@ func GoType(pgType string, nullable bool) reflect.Type {
 		t = reflect.TypeFor[float32]()
 	case "double precision", "float8":
 		t = reflect.TypeFor[float64]()
-	case "numeric", "decimal", "money":
+	case "numeric", "decimal":
 		// 精度敏感的金额应使用 decimal 库；这里给出 float64 并保留原始类型注释。
 		t = reflect.TypeFor[float64]()
+	case "money":
+		// money 的文本形式带货币符号（"$1.00"），扫不进浮点数。
+		t = reflect.TypeFor[string]()
 	case "text", "varchar", "character varying", "char", "character", "citext", "uuid", "inet", "cidr", "macaddr":
 		t = reflect.TypeFor[string]()
 	case "bytea":
 		t = reflect.TypeFor[[]byte]()
 	case "date", "timestamp", "timestamptz", "timestamp with time zone",
-		"timestamp without time zone", "time", "timetz", "time with time zone":
+		"timestamp without time zone":
 		t = reflect.TypeFor[time.Time]()
+	case "time", "timetz", "time without time zone", "time with time zone", "interval":
+		// 一天中的时刻 / 时间间隔没有日期部分，驱动不会把它们转成 time.Time。
+		t = reflect.TypeFor[string]()
 	case "json", "jsonb":
 		// 用 []byte 承载原始 JSON，调用方可自定义 scanner。
 		t = reflect.TypeFor[[]byte]()

@@ -141,6 +141,10 @@ func buildModel(cfg Config, t dialect.Table) model {
 	seen := map[string]int{}
 	for _, c := range t.Columns {
 		goName := fieldName(c.Name)
+		if goName == "TableName" {
+			// 与生成的 TableName() 方法同名会编译失败；标签里仍是原列名。
+			goName = "TableNameCol"
+		}
 		if n := seen[goName]; n > 0 {
 			goName = fmt.Sprintf("%s%d", goName, n+1)
 		}
@@ -153,10 +157,10 @@ func buildModel(cfg Config, t dialect.Table) model {
 		if c.AutoInc {
 			opts = append(opts, "auto")
 		}
-		tag := "xdb:\"" + strings.Join(opts, ",") + "\""
-		if key := columnKey(c); key != "" && isAutoTimeColumn(c) {
-			tag = "xdb:\"" + strings.Join(append(opts, key), ",") + "\""
+		if key := columnKey(c); key != "" && isTimeType(c.Type) {
+			opts = append(opts, key)
 		}
+		tag := "xdb:\"" + strings.Join(opts, ",") + "\""
 
 		comment := c.DataType
 		if c.Nullable {
@@ -175,19 +179,16 @@ func buildModel(cfg Config, t dialect.Table) model {
 	return m
 }
 
-// isAutoTimeColumn 识别常见的创建/更新时间列名，自动补上时间戳标签。
-// 只在列类型确实是时间时生效，避免误标。
-func isAutoTimeColumn(c dialect.Column) bool {
-	if c.Type != reflect.TypeFor[time.Time]() {
-		return false
+// isTimeType 判断列类型是否为 time.Time 或 *time.Time：只有真正的时间列才补
+// autoCreateTime / autoUpdateTime 标签，避免误标（例如 created_at 存的是 Unix 秒）。
+func isTimeType(t reflect.Type) bool {
+	if t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
-	switch strings.ToLower(c.Name) {
-	case "created_at", "create_time", "created_time", "created":
-		return true
-	}
-	return false
+	return t == reflect.TypeFor[time.Time]()
 }
 
+// columnKey 按常见的创建/更新时间列名返回对应的时间戳标签选项。
 func columnKey(c dialect.Column) string {
 	switch strings.ToLower(c.Name) {
 	case "created_at", "create_time", "created_time", "created":
@@ -238,8 +239,10 @@ func fieldName(s string) string {
 		b.WriteString(string(r[1:]))
 	}
 	out := b.String()
-	if out == "" {
-		out = "Col"
+	// 首字符必须是大写字母，字段才是合法且导出的标识符（运行时只映射导出字段）：
+	// 数字开头（2fa）或无大小写的文字（中文列名）都加前缀。
+	if r := []rune(out); len(r) == 0 || !unicode.IsUpper(r[0]) {
+		out = "Col" + out
 	}
 	return out
 }
@@ -261,9 +264,10 @@ func singular(s string) string {
 	return s
 }
 
+// splitIdent 按非字母数字字符切分标识符；分隔符与 Go 标识符里不合法的字符（#、$ 等）一并丢弃。
 func splitIdent(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool {
-		return r == '_' || r == '-' || r == ' ' || r == '.'
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 }
 

@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -97,5 +98,72 @@ func mustExecRaw(t *testing.T, ctx context.Context, db *sql.DB, q string, args .
 	t.Helper()
 	if _, err := db.ExecContext(ctx, q, args...); err != nil {
 		t.Fatalf("%s: %v", q, err)
+	}
+}
+
+// 反向生成选出的 Go 类型必须能真正接住驱动返回的值：
+// 对每种列类型插入一行，再按 DescribeTable 给出的类型逐列扫描。
+func TestReverseTypesScan(t *testing.T) {
+	for _, tg := range targets {
+		t.Run(tg.dialect, func(t *testing.T) {
+			var (
+				in     dialect.Introspector
+				driver string
+				ddl    string
+				insert string
+			)
+			if tg.dialect == "mysql" {
+				in, driver = mysqld.Introspect, "mysql"
+				ddl = `CREATE TABLE reverse_types (
+					id BIGINT PRIMARY KEY, ti TINYINT, tu TINYINT UNSIGNED, si SMALLINT, mi MEDIUMINT,
+					i INT, bu BIGINT UNSIGNED, f FLOAT, d DOUBLE, dec_ DECIMAL(10,2), b BOOL,
+					c CHAR(3), vc VARCHAR(10), tx TEXT, en ENUM('a','b'), st SET('x','y'), js JSON,
+					bin VARBINARY(4), bl BLOB, bt BIT(8),
+					dt DATE, dtt DATETIME(6), ts TIMESTAMP(6), tm TIME, yr YEAR,
+					nul_i INT NULL, nul_t DATETIME NULL)`
+				insert = `INSERT INTO reverse_types VALUES (1, -1, 255, -2, -3, -4, 18446744073709551615,
+					1.5, 2.5, 3.25, true, 'abc', 'v', 't', 'a', 'x,y', '{"k":1}', 0x01020304, 0x05, b'1010',
+					'2024-01-02', '2024-01-02 03:04:05', '2024-01-02 03:04:05', '-838:59:59', 2024, NULL, NULL)`
+			} else {
+				in, driver = pgd.Introspect, "pgx"
+				ddl = `CREATE TABLE reverse_types (
+					id BIGINT PRIMARY KEY, si SMALLINT, i INTEGER, r REAL, dp DOUBLE PRECISION,
+					num NUMERIC(10,2), m MONEY, b BOOLEAN, c CHAR(3), vc VARCHAR(10), tx TEXT, u UUID,
+					ip INET, by BYTEA, js JSON, jb JSONB, arr INTEGER[], tarr TEXT[],
+					d DATE, ts TIMESTAMP, tz TIMESTAMPTZ, tm TIME, ttz TIMETZ, iv INTERVAL,
+					nul_i INTEGER NULL, nul_t TIMESTAMPTZ NULL)`
+				insert = `INSERT INTO reverse_types VALUES (1, -2, -4, 1.5, 2.5, 3.25, 9.99, true, 'abc', 'v', 't',
+					'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '10.0.0.1', '\x0102', '{"k":1}', '{"k":1}',
+					'{1,2}', '{a,b}', '2024-01-02', '2024-01-02 03:04:05', '2024-01-02 03:04:05+00',
+					'03:04:05', '03:04:05+08', '1 day 2 hours', NULL, NULL)`
+			}
+
+			db, err := sql.Open(driver, tg.dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := db.PingContext(ctx); err != nil {
+				t.Skipf("database not reachable (%v)", err)
+			}
+			mustExecRaw(t, ctx, db, "DROP TABLE IF EXISTS reverse_types")
+			mustExecRaw(t, ctx, db, ddl)
+			defer mustExecRaw(t, ctx, db, "DROP TABLE IF EXISTS reverse_types")
+			mustExecRaw(t, ctx, db, insert)
+
+			info, err := in.DescribeTable(ctx, db, "reverse_types")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range info.Columns {
+				dst := reflect.New(c.Type)
+				q := "SELECT " + c.Name + " FROM reverse_types"
+				if err := db.QueryRowContext(ctx, q).Scan(dst.Interface()); err != nil {
+					t.Errorf("column %s (%s) -> %s: %v", c.Name, c.DataType, c.Type, err)
+				}
+			}
+		})
 	}
 }

@@ -99,6 +99,10 @@ func TestFieldName(t *testing.T) {
 		{"user_id", "UserID"},
 		{"created_at", "CreatedAt"},
 		{"a_b_c", "ABC"},
+		{"2fa_code", "Col2faCode"}, // 数字开头不是合法标识符
+		{"用户名", "Col用户名"},          // 无大小写的文字无法导出
+		{"price#usd", "PriceUsd"},  // 非法字符被丢弃
+		{"", "Col"},
 	} {
 		if got := fieldName(c.in); got != c.want {
 			t.Errorf("fieldName(%q) = %q, want %q", c.in, got, c.want)
@@ -144,5 +148,44 @@ func TestAutoTimeOnlyForTimeColumns(t *testing.T) {
 	}
 	if strings.Contains(string(src), "autoCreateTime") {
 		t.Fatalf("must not tag non-time column:\n%s", src)
+	}
+}
+
+// updated_at 同样要补时间戳标签；可空的时间列（*time.Time）也算。
+func TestAutoUpdateTime(t *testing.T) {
+	tables := []dialect.Table{{
+		Name: "posts",
+		Columns: []dialect.Column{
+			{Name: "id", DataType: "bigint", IsPK: true, Type: reflect.TypeFor[int64]()},
+			{Name: "updated_at", DataType: "timestamptz", Type: reflect.TypeFor[time.Time]()},
+			{Name: "created_at", DataType: "timestamptz", Nullable: true, Type: reflect.TypeFor[*time.Time]()},
+		},
+	}}
+	src, err := Render(Config{Pkg: "model"}, tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`xdb:"updated_at,autoUpdateTime"`, `xdb:"created_at,autoCreateTime"`} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("missing %s in:\n%s", want, src)
+		}
+	}
+}
+
+// 列名 table_name 会生成与 TableName() 方法同名的字段，必须改名，否则无法编译。
+func TestTableNameColumn(t *testing.T) {
+	tables := []dialect.Table{{
+		Name: "audit_logs",
+		Columns: []dialect.Column{
+			{Name: "id", DataType: "bigint", IsPK: true, Type: reflect.TypeFor[int64]()},
+			{Name: "table_name", DataType: "text", Type: reflect.TypeFor[string]()},
+		},
+	}}
+	src, err := Render(Config{Pkg: "model"}, tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "TableNameCol string `xdb:\"table_name\"`") {
+		t.Fatalf("table_name column not renamed:\n%s", src)
 	}
 }
