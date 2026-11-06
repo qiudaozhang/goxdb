@@ -636,11 +636,11 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 ### M3（进行中）
 
 - **窗口函数**：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead / FirstValue / LastValue / NthValue`，以及窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。窗口用 `xdb.Win().PartitionBy(...).OrderBy(...).Frame(...)` 描述；框架语法在 MySQL 8 与 PostgreSQL 之间一致，故不作方言翻译。窗口函数只能出现在投影与 ORDER BY 中，过滤需用派生表包一层（测试里覆盖了「每个客户金额最大的订单」这一典型写法）。
-- **软删除**：字段加 `xdb:"deleted_at,softDelete"` 后，`Query / Select / 子查询`自动附加 `<col> IS NULL`，`Delete` 渲染为 `UPDATE ... SET <col> = CURRENT_TIMESTAMP`。`Unscoped()` 用于绕过过滤（查询）或真正物理删除（删除）。软删除列属于**源表**，因此从 `from` 的模型推导而非结果类型——`xdb.Select[int64](nil, P.ID).From(P)` 也能正确过滤；手写的 `xdb.T("posts")` 没有模型信息，不会自动过滤（行为显式）。
+- **软删除**：字段加 `xdb:"deleted_at,softDelete"` 后，`Query / Select / 子查询`自动附加 `<col> IS NULL`，`Delete` 渲染为 `UPDATE ... SET <col> = CURRENT_TIMESTAMP WHERE <col> IS NULL AND ...`（带 Join 时为多表 UPDATE；重复删除不覆盖首次删除时间）。Preload 的关联表、UNION 各分支同样过滤。`Unscoped()` 用于绕过过滤（查询）或真正物理删除（删除）。软删除列属于**源表**，因此从 `from` 的模型推导而非结果类型——`xdb.Select[int64](nil, P.ID).From(P)` 也能正确过滤；手写的 `xdb.T("posts")` 没有模型信息，不会自动过滤（行为显式）。
 - **方言扩展包**：`dialect/pg`（JSONB 路径 `->` / `->>`、`@>`、`jsonb_exists`、数组 `ANY / @> / && / array_length`）与 `dialect/my`（`JSON_EXTRACT` / `JSON_UNQUOTE` / `JSON_CONTAINS_PATH` / `JSON_CONTAINS`、`MATCH ... AGAINST`）。放在子包里，用户显式 import，**不污染通用 API**——用了方言专属特性在 import 上一眼可见。
   - MySQL 的 `??` 占位符转义对 `?` 操作符不友好，因此 `HasKey` 改用等价的 `jsonb_exists()` 函数。
 - **`xdb.Lit[T]`**：把一个原样输出的 SQL 片段包装为表达式（不做参数绑定）。方言扩展包用它内联固定语法；因为它绕过参数绑定，文档中明确要求只用于代码常量，禁止传入用户输入。
-- **读写分离**：`xdb.WithReplica(replicaPool)`。`Executor.session(readOnly bool)` 区分意图：只读查询（All / One / Iter / Count / Exists / Pluck）走副本，写操作与事务始终走主库。`INSERT ... RETURNING` 虽然返回结果集，但按写操作处理（`doQuery(..., readOnly=false)`）——这是个容易写错的地方，测试专门覆盖。`xdb.Primary(db)` 提供强一致读的逃生通道；同一连接池同时作为主库与副本时自动忽略副本配置。
+- **读写分离**：`xdb.WithReplica(replicaPool)`。`Executor.session(readOnly bool)` 区分意图：只读查询（All / One / Iter / Count / Exists / Pluck）走副本，写操作与事务始终走主库。`INSERT ... RETURNING` 虽然返回结果集，但按写操作处理（`doQuery(..., readOnly=false)`）——这是个容易写错的地方，测试专门覆盖。`Raw` 语句只有首个关键字是 `SELECT` 时才走副本（`WITH` 因可含 DML 一律走主库）。`xdb.Primary(db)` 提供强一致读的逃生通道；同一连接池同时作为主库与副本时自动忽略副本配置。
 - **DB-first 反向生成**：`goxdb -db postgres -dsn "$DSN" -dir ./model` 读 information_schema，生成 Go 模型结构体。方言通过 `dialect.Introspector`（`ListTables` / `DescribeTable`）提供 schema 读取，MySQL 与 PostgreSQL 各有一份实现。
   - 类型映射：`dialect.Column.Type` 存映射后的 Go 类型；可空列生成指针，保持「可空 = 可为 nil」。
   - 命名：复数表名单数化（`user_profiles` → `UserProfile`），`id` 字段固定为 `ID`；`status`/`analysis` 等以 `us`/`is` 结尾的词不做单数化（避免 `statu`）。

@@ -471,6 +471,8 @@ func (q *InsertQ[T]) execReturning(ctx context.Context, sqlText string, args []a
 			_ = rows.Close()
 			return int64(n), errors.New("xdb: RETURNING produced more rows than inserted")
 		}
+		// 主键可能位于 nil 的嵌入指针（*Base）里，先分配再取址。
+		schema.AllocEmbedded(chunk[n], q.model.EmbedPtrs)
 		dst := chunk[n].FieldByIndex(ret.Index)
 		if err := rows.Scan(dst.Addr().Interface()); err != nil {
 			_ = rows.Close()
@@ -502,6 +504,7 @@ func (q *InsertQ[T]) backfillLastID(ctx context.Context, res interface{ LastInse
 		}
 	}
 	for i, row := range chunk {
+		schema.AllocEmbedded(row, q.model.EmbedPtrs)
 		if err := setInt(row.FieldByIndex(q.model.Auto.Index), last+int64(i)*step); err != nil {
 			return err
 		}

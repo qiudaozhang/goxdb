@@ -45,6 +45,9 @@ type Plan struct {
 	cols   []string
 	strict bool
 	fields []*schema.Field // 每列对应的字段，nil 表示丢弃（宽松模式）
+	// embedPtrs 是列字段路径上的嵌入指针，扫描前一次性分配，
+	// 之后逐列取址无需再判空。
+	embedPtrs [][]int
 }
 
 // planSet 是同一目标类型下的全部扫描计划。
@@ -132,6 +135,7 @@ func buildPlan(t reflect.Type, cols []string, strict bool) (*Plan, error) {
 		return nil, err
 	}
 	p.mode = modeStruct
+	p.embedPtrs = m.EmbedPtrs
 	p.fields = make([]*schema.Field, len(cols))
 	used := make(map[*schema.Field]string, len(cols))
 	for i, c := range cols {
@@ -214,6 +218,7 @@ func (rs *RowScanner) ScanRow(rows Rows, dst reflect.Value) error {
 		}
 		sv = sv.Elem()
 	}
+	schema.AllocEmbedded(sv, p.embedPtrs)
 	for i, f := range p.fields {
 		if f == nil {
 			rs.ptrs[i] = rs.blank

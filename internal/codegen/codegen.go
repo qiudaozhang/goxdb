@@ -38,7 +38,8 @@ type ModelInfo struct {
 
 // Column 是一个列的生成信息。
 type Column struct {
-	GoName string // 字段名
+	GoName string // 描述符字段名：沿用 Go 字段提升，与其它列重名时加嵌入路径前缀
+	Sel    string // 从模型根到该字段的 Go 选择器，如 "Base.ID"；非嵌入时等于 GoName
 	Column string // 列名
 	Kind   string // xdb.NumberCol / xdb.StringCol / xdb.TimeCol / xdb.Col
 	Type   string // 类型参数（仅 Col[T] 与 NumberCol[T] 使用）
@@ -85,7 +86,7 @@ func ParseDir(dir string) ([]ModelInfo, string, error) {
 		return nil, "", err
 	}
 	fset := token.NewFileSet()
-	var models []ModelInfo
+	var files []*ast.File
 	var pkg string
 	for _, e := range entries {
 		name := e.Name()
@@ -99,66 +100,98 @@ func ParseDir(dir string) ([]ModelInfo, string, error) {
 		if pkg == "" {
 			pkg = f.Name.Name
 		}
-		models = append(models, extract(f)...)
+		files = append(files, f)
 	}
+	// 按整个包提取：嵌入的结构体与 TableName() 方法可能定义在别的文件里。
+	models := extract(files)
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	return models, pkg, nil
 }
 
-// extract 从单个文件里提取模型。
-func extract(f *ast.File) []ModelInfo {
-	// 先收集 TableName() 的返回值，用于覆盖表名推导。
+// extract 从一个包的全部文件里提取模型。
+func extract(files []*ast.File) []ModelInfo {
+	// 先收集 TableName() 的返回值（用于覆盖表名推导）与包内结构体索引（用于展开嵌入字段）。
 	tables := map[string]string{}
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "TableName" || fn.Recv == nil || len(fn.Recv.List) == 0 {
-			continue
-		}
-		recv := receiverName(fn.Recv.List[0].Type)
-		if recv == "" || fn.Body == nil || len(fn.Body.List) != 1 {
-			continue
-		}
-		ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
-		if !ok || len(ret.Results) != 1 {
-			continue
-		}
-		if lit, ok := ret.Results[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-			if s, err := strconv.Unquote(lit.Value); err == nil {
-				tables[recv] = s
+	idx := structIndex{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if name, table, ok := tableNameMethod(d); ok {
+					tables[name] = table
+				}
+			case *ast.GenDecl:
+				if d.Tok != token.TYPE {
+					continue
+				}
+				for _, spec := range d.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						if st, ok := ts.Type.(*ast.StructType); ok {
+							idx[ts.Name.Name] = st
+						}
+					}
+				}
 			}
 		}
 	}
 
 	var out []ModelInfo
-	for _, d := range f.Decls {
-		gd, ok := d.(*ast.GenDecl)
-		if !ok || gd.Tok != token.TYPE {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			ts, ok := spec.(*ast.TypeSpec)
-			if !ok {
+	for _, f := range files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.TYPE {
 				continue
 			}
-			st, ok := ts.Type.(*ast.StructType)
-			if !ok {
-				continue
+			for _, spec := range gd.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				st, ok := ts.Type.(*ast.StructType)
+				if !ok {
+					continue
+				}
+				m, ok := extractModel(ts.Name.Name, st, idx)
+				if !ok {
+					continue
+				}
+				if t, has := tables[m.Name]; has {
+					m.Table = t
+				} else {
+					m.Table = schema.Plural(schema.SnakeCase(m.Name))
+				}
+				out = append(out, m)
 			}
-			m, ok := extractModel(ts.Name.Name, st)
-			if !ok {
-				continue
-			}
-			if t, has := tables[m.Name]; has {
-				m.Table = t
-			} else {
-				m.Table = schema.Plural(schema.SnakeCase(m.Name))
-			}
-			out = append(out, m)
 		}
 	}
 	return out
 }
 
+// tableNameMethod 识别形如 func (T) TableName() string { return "x" } 的方法。
+func tableNameMethod(fn *ast.FuncDecl) (recv, table string, ok bool) {
+	if fn.Name.Name != "TableName" || fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return "", "", false
+	}
+	recv = receiverName(fn.Recv.List[0].Type)
+	if recv == "" || fn.Body == nil || len(fn.Body.List) != 1 {
+		return "", "", false
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return "", "", false
+	}
+	lit, ok := ret.Results[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", "", false
+	}
+	table, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", "", false
+	}
+	return recv, table, true
+}
+
+// receiverName 返回方法接收者的类型名（T 或 *T）。
 func receiverName(e ast.Expr) string {
 	switch t := e.(type) {
 	case *ast.StarExpr:
@@ -169,63 +202,178 @@ func receiverName(e ast.Expr) string {
 	return ""
 }
 
+// structIndex 是包内结构体定义的索引，用于展开嵌入字段。
+type structIndex map[string]*ast.StructType
+
+// colCand 是展开过程中的候选列，冲突消解规则与运行时 schema 一致。
+type colCand struct {
+	c     Column
+	depth int    // 嵌入层级，模型自身字段为 0
+	path  string // 嵌入路径拼接名（如 "Base"），用于描述符改名
+	pk    bool
+}
+
 // extractModel 把结构体转换为列与关联描述。没有 xdb 标签时返回 false：
 // 只有显式标注过的模型才会生成描述符，避免误把 DTO 当作表。
-func extractModel(name string, st *ast.StructType) (ModelInfo, bool) {
+//
+// 嵌入字段（含导出的嵌入指针）会递归展开，并按 schema 的规则消解同名列：
+// 层级最浅者胜出，同层多个则全部丢弃。两边不一致会让生成的扫描器与框架的
+// 列集对不上——那比「不支持」更糟。
+//
+// 描述符字段名沿用 Go 的字段提升（Base.ID → U.ID）；与其它列的描述符重名时
+// 才加上嵌入路径前缀（U.BaseID）。
+func extractModel(name string, st *ast.StructType, idx structIndex) (ModelInfo, bool) {
 	m := ModelInfo{Name: name}
+	var cands []colCand
+	tagged := collect(st, idx, "", "", 0, map[string]bool{name: true}, &cands, &m.Rels)
+	if !tagged {
+		return ModelInfo{}, false
+	}
+
+	// 按列名分组，保持首次出现的顺序（与 schema.parse 相同）。
+	groups := map[string][]colCand{}
+	var order []string
+	for _, c := range cands {
+		if _, seen := groups[c.c.Column]; !seen {
+			order = append(order, c.c.Column)
+		}
+		groups[c.c.Column] = append(groups[c.c.Column], c)
+	}
+	var kept []colCand
+	for _, col := range order {
+		g := groups[col]
+		minDepth := g[0].depth
+		for _, c := range g[1:] {
+			minDepth = min(minDepth, c.depth)
+		}
+		var best []colCand
+		for _, c := range g {
+			if c.depth == minDepth {
+				best = append(best, c)
+			}
+		}
+		if len(best) == 1 { // 生成器只看带标签的字段，同层多个即为歧义
+			kept = append(kept, best[0])
+		}
+	}
+
+	// 描述符名冲突时，嵌入来的列改用带路径前缀的名字。
+	count := map[string]int{}
+	for _, c := range kept {
+		count[c.c.GoName]++
+	}
+	for _, c := range kept {
+		if count[c.c.GoName] > 1 && c.path != "" {
+			c.c.GoName = c.path + c.c.GoName
+		}
+		if c.pk {
+			m.HasPK = true
+		}
+		m.Columns = append(m.Columns, c.c)
+	}
+	if len(m.Columns) == 0 {
+		return ModelInfo{}, false
+	}
+	return m, true
+}
+
+// collect 遍历结构体字段，把列追加到 out、关联追加到 rels（仅模型自身层级）。
+// sel 是从模型根到 st 的选择器前缀，path 是嵌入路径拼接名。返回是否见到 xdb 标签。
+func collect(st *ast.StructType, idx structIndex, sel, path string, depth int, visiting map[string]bool, out *[]colCand, rels *[]Rel) bool {
 	tagged := false
 	for _, field := range st.Fields.List {
+		tag, hasTag := fieldTag(field)
+		if hasTag && tag == "-" {
+			continue
+		}
 		if len(field.Names) == 0 {
-			continue // 跳过嵌入字段（v1 只支持直接字段）
-		}
-		if field.Tag == nil {
+			// 匿名（嵌入）字段：与 schema.walk 一致，只展开同包可见的结构体；
+			// 未导出的嵌入指针无法由框架分配，运行时会跳过，这里同样跳过。
+			typ := embeddedTypeName(field.Type)
+			sub, ok := idx[typ]
+			if !ok || visiting[typ] || (hasTag && tagName(tag) != "") {
+				continue
+			}
+			if _, isPtr := field.Type.(*ast.StarExpr); isPtr && !ast.IsExported(typ) {
+				continue
+			}
+			visiting[typ] = true
+			if collect(sub, idx, sel+typ+".", path+typ, depth+1, visiting, out, nil) {
+				tagged = true
+			}
+			delete(visiting, typ)
 			continue
 		}
-		raw, err := strconv.Unquote(field.Tag.Value)
-		if err != nil {
-			continue
-		}
-		tag, ok := lookupTag(raw, schema.TagName)
-		if !ok || tag == "-" {
+		if !hasTag || !ast.IsExported(field.Names[0].Name) {
 			continue
 		}
 		tagged = true
 		colName, opts := splitTag(tag)
-
+		goName := field.Names[0].Name
 		if kind, isRel := opts["rel"]; isRel {
-			m.Rels = append(m.Rels, Rel{GoName: field.Names[0].Name, Kind: kind, FK: opts["fk"]})
+			if rels != nil { // 嵌入结构体里的关联不提升到上层模型
+				*rels = append(*rels, Rel{GoName: goName, Kind: kind, FK: opts["fk"]})
+			}
 			continue
 		}
 		if colName == "" {
-			colName = schema.SnakeCase(field.Names[0].Name)
+			colName = schema.SnakeCase(goName)
 		}
-		c := Column{GoName: field.Names[0].Name, Column: colName}
-		typ := typeString(field.Type)
-		base := typ
-		if strings.HasPrefix(base, "*") {
-			base = base[1:]
-		}
-		switch {
-		case base == "string":
-			c.Kind = "xdb.StringCol"
-		case base == "time.Time":
-			c.Kind = "xdb.TimeCol"
-		case isNumber(base):
-			c.Kind = "xdb.NumberCol"
-			c.Type = base
-		default:
-			c.Kind = "xdb.Col"
-			c.Type = typ
-		}
-		if _, isPK := opts["pk"]; isPK {
-			m.HasPK = true
-		}
-		m.Columns = append(m.Columns, c)
+		c := newColumn(goName, colName, field.Type)
+		c.Sel = sel + goName
+		_, pk := opts["pk"]
+		*out = append(*out, colCand{c: c, depth: depth, path: path, pk: pk})
 	}
-	if !tagged || len(m.Columns) == 0 {
-		return ModelInfo{}, false
+	return tagged
+}
+
+// fieldTag 返回字段的 xdb 标签值。
+func fieldTag(field *ast.Field) (string, bool) {
+	if field.Tag == nil {
+		return "", false
 	}
-	return m, true
+	raw, err := strconv.Unquote(field.Tag.Value)
+	if err != nil {
+		return "", false
+	}
+	return lookupTag(raw, schema.TagName)
+}
+
+// tagName 返回标签中的列名部分。
+func tagName(tag string) string {
+	name, _ := splitTag(tag)
+	return name
+}
+
+// embeddedTypeName 返回嵌入字段的类型名；外部包（含选择器）返回空。
+func embeddedTypeName(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return embeddedTypeName(t.X)
+	}
+	return ""
+}
+
+// newColumn 按 Go 类型推断列描述符的种类与类型参数。
+func newColumn(goName, colName string, expr ast.Expr) Column {
+	c := Column{GoName: goName, Sel: goName, Column: colName}
+	typ := typeString(expr)
+	base := strings.TrimPrefix(typ, "*")
+	switch {
+	case base == "string":
+		c.Kind = "xdb.StringCol"
+	case base == "time.Time":
+		c.Kind = "xdb.TimeCol"
+	case isNumber(base):
+		c.Kind = "xdb.NumberCol"
+		c.Type = base
+	default:
+		c.Kind = "xdb.Col"
+		c.Type = typ
+	}
+	return c
 }
 
 func lookupTag(raw, key string) (string, bool) {
@@ -354,7 +502,9 @@ func renderScanner(b *bytes.Buffer, m ModelInfo) {
 	fmt.Fprintf(b, "func (s *%sScanner) ScanDest(dst any) ([]any, error) {\n", scan)
 	fmt.Fprintf(b, "\tm, ok := dst.(*%s)\n\tif !ok {\n\t\treturn nil, fmt.Errorf(\"goxdb: %s scanner got %%T\", dst)\n\t}\n", m.Name, m.Name)
 	for i, c := range m.Columns {
-		fmt.Fprintf(b, "\ts.dest[%d] = &m.%s\n", i, c.GoName)
+		// 嵌入字段走完整选择器（&m.Base.ID）；途经的嵌入指针由框架在
+		// 调用 ScanDest 前分配（schema.Model.EmbedPtrs）。
+		fmt.Fprintf(b, "\ts.dest[%d] = &m.%s\n", i, c.Sel)
 	}
 	fmt.Fprintf(b, "\treturn s.dest[:], nil\n}\n\n")
 }

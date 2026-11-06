@@ -17,7 +17,6 @@ import (
 	"unicode"
 
 	"github.com/qiudaozhang/goxdb/dialect"
-	"github.com/qiudaozhang/goxdb/internal/schema"
 )
 
 // Config 控制生成行为。
@@ -297,6 +296,3 @@ func importsTime(models []model) bool {
 	}
 	return false
 }
-
-// 保证 schema 包被引用（结构体名推导复用其规则，保持与 model-first 一致）。
-var _ = schema.SnakeCase

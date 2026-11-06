@@ -2,6 +2,7 @@ package xdb
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"reflect"
 	"slices"
@@ -22,6 +23,7 @@ import (
 //
 // 实现：主查询 → 收集主键（或外键）→ `WHERE fk IN (...)` 分批查询 → 内存回填。
 // 关联不会被隐式懒加载：没有 Preload 的关联字段保持零值。
+// 关联模型带 softDelete 列时只加载未删除的行；主查询 Unscoped() 时不过滤。
 func (q *Q[T]) Preload(name string, conds ...Cond) *Q[T] {
 	c := q.clone()
 	c.preloads = append(slices.Clip(c.preloads), preloadSpec{name: name, conds: conds})
@@ -93,8 +95,8 @@ func (q *Q[T]) preloadOne(ctx context.Context, m *schema.Model, rel *schema.Rela
 	keys := make([]any, 0, rows.Len())
 	seen := make(map[string]bool, rows.Len())
 	for i := 0; i < rows.Len(); i++ {
-		k := fieldValue(rows.Index(i), parentField.Index)
-		if k == nil {
+		k, ok := relKey(fieldValue(rows.Index(i), parentField.Index))
+		if !ok {
 			continue
 		}
 		if s := fmt.Sprint(k); seen[s] {
@@ -119,12 +121,16 @@ func (q *Q[T]) preloadOne(ctx context.Context, m *schema.Model, rel *schema.Rela
 		}
 		cfield, _ := child.Lookup(childCol)
 		for _, v := range vals {
-			k := fmt.Sprint(fieldValue(v, cfield.Index))
-			byKey[k] = append(byKey[k], v)
+			k, ok := relKey(fieldValue(v, cfield.Index))
+			if !ok {
+				continue
+			}
+			s := fmt.Sprint(k)
+			byKey[s] = append(byKey[s], v)
 		}
 	}
 
-	return assignRelated(rows, m, rel, parentField, byKey)
+	return assignRelated(rows, rel, parentField, byKey)
 }
 
 // fetchRelated 执行子表查询并返回可寻址的目标类型值列表。
@@ -141,8 +147,14 @@ func (q *Q[T]) fetchRelated(ctx context.Context, child *schema.Model, col string
 	b.write(" FROM ")
 	Table{name: child.Table}.buildFrom(b)
 	b.write(" WHERE ")
-	keyCol := C[any](Table{name: child.Table}, col)
-	where := And(append([]Cond{keyCol.In(keys...)}, conds...)...)
+	tbl := Table{name: child.Table}
+	keyCol := C[any](tbl, col)
+	filters := []Cond{keyCol.In(keys...)}
+	// 子表带软删除列时只加载未删除的行；主查询 Unscoped 时一并关闭。
+	if child.SoftDelete != nil && !q.unscoped {
+		filters = append(filters, C[any](tbl, child.SoftDelete.Column).IsNull())
+	}
+	where := And(append(filters, conds...)...)
 	where.build(b)
 	q2, args, err := b.result()
 	if err != nil {
@@ -168,13 +180,14 @@ func (q *Q[T]) fetchRelated(ctx context.Context, child *schema.Model, col string
 }
 
 // assignRelated 把按 key 归组的子行写回主行的关联字段。
-func assignRelated(rows reflect.Value, m *schema.Model, rel *schema.Relation, parentField *schema.Field, byKey map[string][]reflect.Value) error {
-	_ = m
+func assignRelated(rows reflect.Value, rel *schema.Relation, parentField *schema.Field, byKey map[string][]reflect.Value) error {
 	for i := 0; i < rows.Len(); i++ {
 		row := rows.Index(i)
 		dst := row.FieldByIndex(rel.Index)
-		k := fmt.Sprint(fieldValue(row, parentField.Index))
-		matches := byKey[k]
+		var matches []reflect.Value
+		if k, ok := relKey(fieldValue(row, parentField.Index)); ok {
+			matches = byKey[fmt.Sprint(k)]
+		}
 
 		switch rel.Kind {
 		case schema.HasMany:
@@ -201,4 +214,38 @@ func assignRelated(rows reflect.Value, m *schema.Model, rel *schema.Relation, pa
 		}
 	}
 	return nil
+}
+
+// relKey 把关联键归一化为可比较的底层值：解引用指针、展开 driver.Valuer
+// （如 sql.NullInt64）。值为 NULL 时返回 false，该行不参与匹配。
+//
+// 父子两端的键类型常常不同（例如主键 int64、可空外键 *int64），
+// 不归一化的话 fmt.Sprint 会打印指针地址，导致关联永远匹配不上。
+func relKey(v any) (any, bool) {
+	for v != nil {
+		if vl, ok := v.(driver.Valuer); ok {
+			rv := reflect.ValueOf(v)
+			if rv.Kind() == reflect.Pointer && rv.IsNil() {
+				return nil, false
+			}
+			x, err := vl.Value()
+			if err != nil {
+				return nil, false
+			}
+			if _, again := x.(driver.Valuer); again {
+				return x, true // 防御：避免 Value() 返回自身导致死循环
+			}
+			v = x
+			continue
+		}
+		rv := reflect.ValueOf(v)
+		if rv.Kind() != reflect.Pointer {
+			return v, true
+		}
+		if rv.IsNil() {
+			return nil, false
+		}
+		v = rv.Elem().Interface()
+	}
+	return nil, false
 }

@@ -12,13 +12,13 @@ func V[T any](v T) E[T] { return wrap[T](valNode{v}) }
 //	xdb.SQL[bool]("? @> ?", P.Tags, xdb.AsIs(tags))
 func SQL[T any](frag string, args ...any) E[T] { return wrap[T](sqlNode{frag: frag, args: args}) }
 
-// Raw 把一个**原样输出**的 SQL 片段包装为表达式（不做参数绑定）。
+// Lit 把一个**原样输出**的 SQL 片段包装为表达式（不做参数绑定）。
 //
 // 它是 SQL[T] 的严格版本：片段中的任何内容都会直接进入生成的 SQL，
 // 因此**只能用于固定的、不含用户输入的文本**。任何来自外部输入的值都必须
 // 走 xdb.SQL 的参数占位符或 V，否则会有 SQL 注入风险。
 //
-//	xdb.Raw[int]("COUNT(*)"))
+//	xdb.Lit[int64]("COUNT(*)")
 //	xdb.Lit[string]("\"meta\" ->> 'status'")
 func Lit[T any](sql string) E[T] { return wrap[T](rawNode(sql)) }
 

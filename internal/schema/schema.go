@@ -65,6 +65,9 @@ type Model struct {
 	SoftDelete *Field
 	// Relations 是按字段名索引的关联定义。
 	Relations map[string]*Relation
+	// EmbedPtrs 是列字段索引路径上经过的嵌入指针（如 *Base）的路径，外层在前。
+	// 写字段前须先用 AllocEmbedded 分配，否则会解引用 nil。
+	EmbedPtrs [][]int
 	byName    map[string]*Field
 	byLower   map[string]*Field
 }
@@ -190,13 +193,53 @@ func parse(t reflect.Type) (*Model, error) {
 			m.byLower[lower] = f
 		}
 	}
+	m.EmbedPtrs = embedPtrPaths(t, m.Fields)
 	return m, nil
 }
 
-func dominant(cs []candidate) (*Field, bool) {
-	if len(cs) == 1 {
-		return cs[0].f, true
+// embedPtrPaths 收集各列字段索引路径中「指向嵌入指针字段」的前缀，去重且外层在前。
+// 只看最终入选的列：被冲突规则丢弃的字段不会让框架去分配它的嵌入结构体。
+func embedPtrPaths(t reflect.Type, fields []*Field) [][]int {
+	var out [][]int
+	seen := map[string]bool{}
+	for _, f := range fields {
+		ft := t
+		for i := 0; i < len(f.Index)-1; i++ {
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			ft = ft.Field(f.Index[i]).Type
+			if ft.Kind() != reflect.Pointer {
+				continue
+			}
+			key := fmt.Sprint(f.Index[:i+1])
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, f.Index[:i+1:i+1])
+			}
+		}
 	}
+	return out
+}
+
+// AllocEmbedded 为 v（可寻址的结构体值）中 paths 上为 nil 的嵌入指针分配内存。
+// paths 必须外层在前（Model.EmbedPtrs 满足这一点），这样内层路径经过的指针已分配。
+func AllocEmbedded(v reflect.Value, paths [][]int) {
+	for _, path := range paths {
+		f := v
+		for i, x := range path {
+			if i > 0 && f.Kind() == reflect.Pointer {
+				f = f.Elem()
+			}
+			f = f.Field(x)
+		}
+		if f.IsNil() {
+			f.Set(reflect.New(f.Type().Elem()))
+		}
+	}
+}
+
+func dominant(cs []candidate) (*Field, bool) {
 	if len(cs) == 1 {
 		return cs[0].f, true
 	}

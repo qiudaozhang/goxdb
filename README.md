@@ -221,6 +221,10 @@ func (u *User) NewRowScanner(columns []string) (xdb.ScanRows, error) { ... }
 
 列类型由 Go 字段类型决定，因此 `U.Age.Eq("abc")` **编译失败**。
 
+嵌入结构体（值或导出的指针，如 `Base` / `*Base`）会被展开，描述符沿用 Go 的字段提升：
+`Base.ID` 生成为 `U.ID`；与模型自身的字段重名时改为 `U.BaseID`。同名列的取舍与运行时一致——
+层级最浅者胜出，同层重复则都不作为列。嵌入的 `*Base` 为 nil 时，扫描与主键回填会自动分配。
+
 #### 零反射扫描
 
 生成器还会为每个模型生成 `NewRowScanner`，实现 `xdb.RowScanner`。
@@ -370,12 +374,13 @@ type Post struct {
 xdb.Query[Post](db).All(ctx)                  // 自动附加 deleted_at IS NULL
 xdb.Query[Post](db).Unscoped().All(ctx)       // 也能看到已删除的行
 
-xdb.Delete[Post](db).Where(P.ID.Eq(1)).Exec(ctx)          // → UPDATE ... SET deleted_at = CURRENT_TIMESTAMP
+xdb.Delete[Post](db).Where(P.ID.Eq(1)).Exec(ctx)          // → UPDATE ... SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND ...
 xdb.Delete[Post](db).Unscoped().Where(P.ID.Eq(1)).Exec(ctx) // → 真正物理删除
 ```
 
-软删除过滤对子查询同样生效。它由**源表**推导，所以 `xdb.Select[int64](nil, P.ID).From(P)` 也会过滤；
-手写的 `xdb.T("posts")` 不含模型信息，不会自动过滤。
+软删除过滤对子查询、UNION 各分支、`Count` / `Pluck` 与 Preload 的关联表同样生效（`Unscoped()` 一并关闭）。
+它由**源表**推导，所以 `xdb.Select[int64](nil, P.ID).From(P)` 也会过滤；
+手写的 `xdb.T("posts")` 不含模型信息，不会自动过滤。已删除的行不会被再次标记，重复删除影响 0 行。
 
 ### 读写分离
 

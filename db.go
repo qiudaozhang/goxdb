@@ -62,7 +62,7 @@ type options struct {
 
 // WithReplica 配置只读副本连接池，用于读写分离。
 //
-// 只读查询（All / One / Iter / Count / Exists / Pluck、以及 Raw 的查询）会走副本；
+// 只读查询（All / One / Iter / Count / Exists / Pluck、以及以 SELECT 开头的 Raw 语句）会走副本；
 // 写操作与事务**始终**走主库——事务一旦开启就固定在主库，避免读到不一致的快照。
 //
 // 主从延迟意味着刚写入的数据可能立刻读不到。需要强一致读时，在事务中读取

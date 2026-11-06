@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"iter"
 	"reflect"
+	"strings"
 
 	"github.com/qiudaozhang/goxdb/dialect"
 	"github.com/qiudaozhang/goxdb/internal/scan"
@@ -21,6 +22,9 @@ type stmt struct {
 	ex     Executor
 	render func(d dialect.Dialect) (string, []any, error)
 	strict bool
+	// write 为 true 表示语句会修改数据（如 INSERT ... RETURNING），
+	// 即便返回结果集也必须走主库。
+	write bool
 }
 
 // query 渲染并执行查询。
@@ -32,7 +36,7 @@ func (s stmt) query(ctx context.Context) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	return doQuery(ctx, s.ex, q, a, true)
+	return doQuery(ctx, s.ex, q, a, !s.write)
 }
 
 func (s stmt) exec(ctx context.Context) (sql.Result, error) {
@@ -56,9 +60,51 @@ type RawQuery struct {
 // Raw 构造原始 SQL 语句。
 //
 //	xdb.Raw(db, "SELECT * FROM users WHERE id IN (?) AND age > ?", ids, 18)
+//
+// 读写分离时，只有以 SELECT 开头的语句会路由到只读副本；其余语句
+// （INSERT/UPDATE/DELETE ... RETURNING、WITH、CALL 等）一律走主库。
+// 会产生写副作用的 SELECT（如调用写数据的函数）请用 xdb.Primary(db) 执行。
 func Raw(ex Executor, query string, args ...any) *RawQuery {
 	render := func(d dialect.Dialect) (string, []any, error) { return sqlbind.Bind(d, query, args) }
-	return &RawQuery{s: stmt{ex: ex, render: render, strict: true}}
+	return &RawQuery{s: stmt{ex: ex, render: render, strict: true, write: !isSelect(query)}}
+}
+
+// isSelect 判断语句的第一个关键字是否为 SELECT（跳过空白、注释与左括号）。
+// WITH 不算：PostgreSQL 的 CTE 中可以包含 INSERT/UPDATE/DELETE。
+func isSelect(q string) bool {
+	for i := 0; i < len(q); {
+		switch c := q[i]; {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '(':
+			i++
+		case strings.HasPrefix(q[i:], "--"):
+			j := strings.IndexByte(q[i:], '\n')
+			if j < 0 {
+				return false
+			}
+			i += j + 1
+		case strings.HasPrefix(q[i:], "/*"):
+			j := strings.Index(q[i+2:], "*/")
+			if j < 0 {
+				return false
+			}
+			i += 2 + j + 2
+		default:
+			const kw = "SELECT"
+			if len(q)-i < len(kw) || !strings.EqualFold(q[i:i+len(kw)], kw) {
+				return false
+			}
+			// 关键字之后必须是分隔符，排除 SELECTX 之类的标识符。
+			if rest := q[i+len(kw):]; rest != "" {
+				switch rest[0] {
+				case ' ', '\t', '\n', '\r', '(', '*', '/', '-':
+				default:
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // Lenient 返回宽松模式的副本：结果列找不到对应字段时忽略而不是报错。

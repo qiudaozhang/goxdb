@@ -228,6 +228,11 @@ func (q *Q[T]) union(all bool, other *Q[T]) *Q[T] {
 		c.err = other.err
 	}
 	oc := other.c
+	// 右侧查询的软删除过滤在合并时确定：顶层 SQL() 只为最外层 core 推导过滤条件，
+	// 不会再看 unions 里的各个 core。
+	if oc.from != nil && !other.unscoped {
+		oc.softDelete = other.softDeleteField()
+	}
 	if (len(oc.orderBy) > 0 || oc.limit >= 0 || oc.offset > 0 || oc.lock.mode != "" || len(oc.unions) > 0 || len(oc.ctes) > 0) && c.err == nil {
 		c.err = errors.New("xdb: a UNION operand cannot have ORDER BY, LIMIT, OFFSET, locks, CTEs or nested unions")
 	}
@@ -321,7 +326,7 @@ func (q *Q[T]) Count(ctx context.Context) (int64, error) {
 	} else {
 		core := inner.c
 		core.cols = []Node{Count()}
-		cq = &Q[int64]{ex: q.ex, c: core}
+		cq = &Q[int64]{ex: q.ex, c: core, unscoped: q.unscoped}
 	}
 	return cq.One(ctx)
 }
@@ -340,7 +345,7 @@ func (q *Q[T]) Exists(ctx context.Context) (bool, error) {
 
 // Pluck 查询单列并返回其值列表：ids, err := xdb.Pluck(ctx, xdb.Query[User](db).Where(...), U.ID)。
 func Pluck[V, T any](ctx context.Context, q *Q[T], col Expr[V]) ([]V, error) {
-	c := &Q[V]{ex: q.ex, c: q.c, err: q.err}
+	c := &Q[V]{ex: q.ex, c: q.c, err: q.err, unscoped: q.unscoped, lenient: q.lenient}
 	c.c.cols = []Node{col}
 	return c.All(ctx)
 }

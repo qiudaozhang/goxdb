@@ -182,3 +182,27 @@ func TestSamePoolAsReplicaIsIgnored(t *testing.T) {
 		t.Fatal("same pool must be treated as no replica")
 	}
 }
+
+// Raw 中返回结果集的写语句必须走主库；只有 SELECT 才路由到副本。
+func TestReplicaRawWriteGoesToPrimary(t *testing.T) {
+	r := &router{}
+	db := replicaDB(t, r)
+
+	for _, c := range []struct {
+		sql  string
+		want string
+	}{
+		{"INSERT INTO customers (name) VALUES ('x') RETURNING id", "primary"},
+		{"update customers SET name = 'y' RETURNING id", "primary"},
+		{"WITH d AS (DELETE FROM customers RETURNING id) SELECT id FROM d", "primary"},
+		{"  -- 注释\n/* 块注释 */ (SELECT id FROM customers)", "replica"},
+		{"select id from customers", "replica"},
+		{"SELECTX", "primary"},
+	} {
+		r.reset()
+		_, _ = xdb.All[int64](ctx, xdb.Raw(db, c.sql).Lenient())
+		if got := r.got(); len(got) != 1 || got[0] != c.want {
+			t.Errorf("%q: routed to %v, want %s", c.sql, got, c.want)
+		}
+	}
+}

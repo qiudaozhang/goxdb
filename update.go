@@ -168,10 +168,7 @@ func (q *UpdateQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 	q.buildTarget(b)
 	b.write(" SET ")
 	buildAssignments(b, q.table, q.sets)
-	var extra []Cond
-	if len(q.joins) > 0 {
-		extra = q.buildJoinFrom(b)
-	}
+	extra := q.buildJoinFrom(b)
 	if !where.IsZero() || len(extra) > 0 {
 		b.write(" WHERE ")
 		And(append(append([]Cond{}, extra...), q.where...)...).build(b)
@@ -181,27 +178,36 @@ func (q *UpdateQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 
 // buildTarget 写入 UPDATE 的目标表。MySQL 的多表 UPDATE 把 JOIN 直接接在表名后；
 // PostgreSQL 则是 UPDATE a SET ... FROM b。
-func (q *UpdateQ[T]) buildTarget(b *builder) {
-	q.table.buildFrom(b)
-	if len(q.joins) == 0 || b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
-		for _, j := range q.joins {
-			b.write(" " + j.kind + " ")
-			j.src.buildFrom(b)
-			b.write(" ON ")
-			j.on.build(b)
-		}
-	}
-}
+func (q *UpdateQ[T]) buildTarget(b *builder) { buildUpdateTarget(b, q.table, q.joins) }
 
 // buildJoinFrom 为 PostgreSQL 渲染 FROM 子句（多表 UPDATE）并返回需要并入 WHERE 的连接条件；
 // MySQL 已在 buildTarget 中内联 JOIN + ON，此处不输出。
-func (q *UpdateQ[T]) buildJoinFrom(b *builder) []Cond {
-	if b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
+func (q *UpdateQ[T]) buildJoinFrom(b *builder) []Cond { return buildUpdateJoinFrom(b, q.joins) }
+
+// buildUpdateTarget 写入 UPDATE 的目标表；内联风格（MySQL）的方言在此输出 JOIN ... ON。
+// UpdateQ 与软删除的 DeleteQ 共用。
+func buildUpdateTarget(b *builder, table Table, joins []joinClause) {
+	table.buildFrom(b)
+	if b.d.Features().UpdateJoinStyle != dialect.UpdateJoinInline {
+		return
+	}
+	for _, j := range joins {
+		b.write(" " + j.kind + " ")
+		j.src.buildFrom(b)
+		b.write(" ON ")
+		j.on.build(b)
+	}
+}
+
+// buildUpdateJoinFrom 为 FROM 风格（PostgreSQL）的方言输出 FROM 子句，
+// 返回需要并入 WHERE 的连接条件；内联风格或无连接时不输出。
+func buildUpdateJoinFrom(b *builder, joins []joinClause) []Cond {
+	if len(joins) == 0 || b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
 		return nil
 	}
 	b.write(" FROM ")
-	on := make([]Cond, 0, len(q.joins))
-	for i, j := range q.joins {
+	on := make([]Cond, 0, len(joins))
+	for i, j := range joins {
 		if i > 0 {
 			b.write(", ")
 		}
@@ -365,18 +371,26 @@ func (q *DeleteQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 		return "", nil, ErrMissingWhere
 	}
 	b := newBuilder(d)
-	// 软删除：DELETE 改写为 UPDATE ... SET <col> = CURRENT_TIMESTAMP。
+	// 软删除：DELETE 改写为 UPDATE ... SET <col> = CURRENT_TIMESTAMP WHERE <col> IS NULL AND ...。
+	// 带 Join 时按多表 UPDATE 渲染，与 UpdateQ.Join 的方言差异一致。
 	if q.softDelete != nil && !q.unscoped {
 		b.write("UPDATE ")
-		q.table.buildFrom(b)
+		buildUpdateTarget(b, q.table, q.joins)
 		b.write(" SET ")
+		if len(q.joins) > 0 && b.d.Features().UpdateJoinStyle == dialect.UpdateJoinInline {
+			// MySQL 多表 UPDATE 中裸列名可能有歧义（连接表也有 deleted_at）。
+			// PostgreSQL 的 SET 不允许表限定，FROM 风格因此不加。
+			b.ident(q.table.qualifier())
+			b.write(".")
+		}
 		b.ident(q.softDelete.Column)
 		b.write(" = ")
 		b.node(nowNode{})
-		if !where.IsZero() {
-			b.write(" WHERE ")
-			where.build(b)
-		}
+		extra := buildUpdateJoinFrom(b, q.joins)
+		// 只标记尚未删除的行：重复删除不覆盖首次删除时间，受影响行数也如实反映。
+		alive := wrap[bool](postfixNode{colNode{src: q.table, name: q.softDelete.Column}, "IS NULL"})
+		b.write(" WHERE ")
+		And(append(append(extra, alive), q.where...)...).build(b)
 		return b.result()
 	}
 	var extra []Cond

@@ -1,7 +1,9 @@
 package schema
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,4 +145,73 @@ func TestTableName(t *testing.T) {
 	if len(m.PK) != 1 || m.Auto == nil || m.Auto.Column != "id" {
 		t.Fatal("pk/auto not detected")
 	}
+}
+
+// 与 internal/codegen 的 TestEmbeddedFields 使用同一组模型：两边选出的列必须一致，
+// 否则生成的扫描器与运行时列集对不上。
+type ebBase struct {
+	ID        int64     `xdb:"id,pk,auto"`
+	CreatedAt time.Time `xdb:"created_at"`
+	Note      string    `xdb:"base_note"`
+	Name      string    `xdb:"base_name"`
+}
+type EbAudit struct {
+	CreatedAt time.Time `xdb:"created_at"`
+	By        string    `xdb:"by"`
+}
+type ebTagged struct {
+	By string `xdb:"by"`
+}
+type ebUser struct {
+	ebBase
+	*EbAudit
+	ebTagged
+	Name string `xdb:"name"`
+}
+
+func TestEmbeddedConflictsMatchCodegen(t *testing.T) {
+	m, err := Of(reflect.TypeFor[ebUser]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cols []string
+	for _, f := range m.Fields {
+		cols = append(cols, f.Column)
+	}
+	if got, want := strings.Join(cols, ","), "id,base_note,base_name,name"; got != want {
+		t.Fatalf("columns = %s, want %s", got, want)
+	}
+	// *EbAudit 的列全部因冲突被丢弃，不应出现在 EmbedPtrs 中。
+	if len(m.EmbedPtrs) != 0 {
+		t.Fatalf("EmbedPtrs = %v, want none", m.EmbedPtrs)
+	}
+}
+
+type EbInner struct {
+	X int `xdb:"x"`
+}
+type EbMid struct {
+	*EbInner
+	Y int `xdb:"y"`
+}
+type ebOuter struct {
+	*EbMid
+	Z int `xdb:"z"`
+}
+
+// 多层嵌入指针：路径外层在前，AllocEmbedded 能逐层分配。
+func TestEmbedPtrsNested(t *testing.T) {
+	m, err := Of(reflect.TypeFor[ebOuter]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(m.EmbedPtrs); got != "[[0] [0 0]]" {
+		t.Fatalf("EmbedPtrs = %s", got)
+	}
+	var o ebOuter
+	AllocEmbedded(reflect.ValueOf(&o).Elem(), m.EmbedPtrs)
+	if o.EbMid == nil || o.EbInner == nil {
+		t.Fatal("embedded pointers not allocated")
+	}
+	o.X = 1 // 不应 panic
 }

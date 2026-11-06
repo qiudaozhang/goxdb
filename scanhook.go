@@ -4,6 +4,7 @@ import (
 	"reflect"
 
 	"github.com/qiudaozhang/goxdb/internal/scan"
+	"github.com/qiudaozhang/goxdb/internal/schema"
 )
 
 // RowScanner 是可选的零反射扫描钩子，由模型类型自己实现。
@@ -62,6 +63,9 @@ var _ scanHook = (*hookScanner)(nil)
 type hookScanner struct {
 	typ     reflect.Type // 实现了 RowScanner 的指针类型
 	scanner ScanRows
+	// embedPtrs 是列字段路径上的嵌入指针（schema.Model.EmbedPtrs）。
+	// 生成代码直接写 &m.Base.ID，框架必须先把 nil 的 Base 分配好。
+	embedPtrs [][]int
 }
 
 // bind 在首次扫描前用结果列构造模型专属扫描器。
@@ -77,6 +81,9 @@ func (h *hookScanner) bind(cols []string) (ok bool) {
 		return false
 	}
 	h.scanner = sc
+	if m, err := schema.Of(h.typ.Elem()); err == nil {
+		h.embedPtrs = m.EmbedPtrs
+	}
 	return true
 }
 
@@ -90,6 +97,7 @@ func (h *hookScanner) ScanRow(rows scan.Rows, dst reflect.Value) error {
 		}
 		sv = sv.Elem()
 	}
+	schema.AllocEmbedded(sv, h.embedPtrs)
 	ptrs, err := h.scanner.ScanDest(sv.Addr().Interface())
 	if err != nil {
 		return err
