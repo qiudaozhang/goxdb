@@ -61,6 +61,9 @@ func doExec(ctx context.Context, ex Executor, q string, a []any) (sql.Result, er
 	hctx := s.db.before(ctx, ev)
 	res, err := s.conn.ExecContext(hctx, q, a...)
 	err = s.db.wrapErr(err, q)
+	if s.tx != nil {
+		err = s.tx.noteErr(err)
+	}
 	if err == nil {
 		if n, e := res.RowsAffected(); e == nil {
 			ev.Rows = n
@@ -85,6 +88,9 @@ func doQuery(ctx context.Context, ex Executor, q string, a []any, readOnly bool)
 	rows, err := s.conn.QueryContext(hctx, q, a...)
 	if err != nil {
 		err = s.db.wrapErr(err, q)
+		if s.tx != nil {
+			err = s.tx.noteErr(err)
+		}
 		ev.Err = err
 		s.db.after(hctx, ev)
 		release()
@@ -92,6 +98,9 @@ func doQuery(ctx context.Context, ex Executor, q string, a []any, readOnly bool)
 	}
 	r := &Rows{Rows: rows, db: s.db, query: q}
 	r.finish = func(err error, n int64) {
+		if s.tx != nil {
+			_ = s.tx.noteErr(err) // 死锁也可能在逐行读取时才报告；Err() 的返回值不在此处改写
+		}
 		ev.Err = err
 		ev.Rows = n
 		s.db.after(hctx, ev)

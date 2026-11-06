@@ -93,6 +93,10 @@ type Features struct {
 	// UpdateJoinStyle：多表 UPDATE / DELETE 的语法风格（两者相同：MySQL 都是 JOIN 内联，
 	// PostgreSQL 都是 FROM / USING 子句）。
 	UpdateJoinStyle UpdateJoinStyle
+	// DeadlockRollsBackTx：死锁时服务端回滚**整个**事务（MySQL InnoDB）。此后连接处于
+	// 自动提交模式，后续语句会各自提交，因此框架必须把事务标记为中止。
+	// PostgreSQL 只中止当前（子）事务，可以 ROLLBACK TO SAVEPOINT 恢复，不设置此项。
+	DeadlockRollsBackTx bool
 }
 
 // ErrorKind 是与数据库无关的服务端错误分类。

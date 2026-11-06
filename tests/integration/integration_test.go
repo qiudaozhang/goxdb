@@ -11,6 +11,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -351,6 +352,74 @@ func TestManualTxContextCancel(t *testing.T) {
 		}
 		if balance(t, db, 1) != 100 {
 			t.Fatal("canceled tx must not commit")
+		}
+	})
+}
+
+// 事务中吞掉死锁错误后继续执行：MySQL 已回滚整个事务、连接回到自动提交模式，
+// 后续写入必须被拒绝，Tx 返回 ErrTxAborted 而不是报告成功；配合 TxRetry 时整体重试。
+func TestSwallowedDeadlock(t *testing.T) {
+	forEachDB(t, func(t *testing.T, db *xdb.DB) {
+		for _, retry := range []bool{false, true} {
+			mustExec(t, db, "UPDATE accounts SET note = NULL")
+			mustExec(t, db, "DELETE FROM accounts WHERE id > 2")
+			vLocked, hReady := make(chan struct{}), make(chan struct{})
+			hDone := make(chan error, 1)
+			go func() { // H：更重的事务（写入更多行），让 InnoDB 选 V 作为牺牲者
+				<-vLocked
+				h, err := db.Begin(ctx)
+				if err != nil {
+					hDone <- err
+					return
+				}
+				defer h.RollbackUnlessCommitted()
+				if _, err := xdb.Raw(h, "UPDATE accounts SET note = 'h' WHERE id = 2").Exec(ctx); err != nil {
+					hDone <- err
+					return
+				}
+				for i := 10; i < 40; i++ {
+					if _, err := xdb.Raw(h, "INSERT INTO accounts (id, name, balance) VALUES (?, ?, 0)", i, fmt.Sprintf("h%d", i)).Exec(ctx); err != nil {
+						hDone <- err
+						return
+					}
+				}
+				close(hReady)
+				time.Sleep(300 * time.Millisecond) // 等 V 阻塞在 id=2 上
+				_, err = xdb.Raw(h, "UPDATE accounts SET note = 'h' WHERE id = 1").Exec(ctx)
+				hDone <- err // 之后回滚，不留数据
+			}()
+			attempts := 0
+			var opts []xdb.TxOption
+			if retry {
+				opts = append(opts, xdb.TxRetry(3, xdb.ConstBackoff(50*time.Millisecond)))
+			}
+			err := db.Tx(ctx, func(ctx context.Context, tx *xdb.Tx) error {
+				attempts++
+				if _, err := xdb.Raw(tx, "UPDATE accounts SET note = 'v' WHERE id = 1").Exec(ctx); err != nil {
+					return err
+				}
+				if attempts == 1 {
+					close(vLocked)
+					<-hReady
+					_, _ = xdb.Raw(tx, "UPDATE accounts SET note = 'v' WHERE id = 2").Exec(ctx) // 死锁，错误被吞掉
+				}
+				_, err := xdb.Raw(tx, "INSERT INTO accounts (id, name, balance) VALUES (3, 'carol', 0)").Exec(ctx)
+				return err
+			}, opts...)
+			if herr := <-hDone; herr != nil {
+				t.Fatalf("H: %v", herr)
+			}
+			note, _ := xdb.One[*string](ctx, xdb.Raw(db, "SELECT note FROM accounts WHERE id = 1"))
+			carol := count(t, db) - 2
+			if !retry {
+				if !errors.Is(err, xdb.ErrTxAborted) || carol != 0 || note != nil {
+					t.Fatalf("no retry: err=%v carol=%d note=%v", err, carol, note)
+				}
+				continue
+			}
+			if err != nil || attempts != 2 || carol != 1 || note == nil || *note != "v" {
+				t.Fatalf("retry: err=%v attempts=%d carol=%d note=%v", err, attempts, carol, note)
+			}
 		}
 	})
 }

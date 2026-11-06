@@ -71,6 +71,7 @@ func (mysqlDialect) Features() dialect.Features {
 		Upsert:              dialect.UpsertOnDuplicateKey,
 		OffsetRequiresLimit: true,
 		UpdateJoinStyle:     dialect.UpdateJoinInline,
+		DeadlockRollsBackTx: true,
 	}
 }
 

@@ -92,7 +92,7 @@ type Order struct {
 }
 ```
 
-- 支持嵌入结构体、`sql.Scanner` / `driver.Valuer`、`xdb.Null[T]`、指针表示可空。
+- 支持嵌入结构体、`sql.Scanner` / `driver.Valuer`、`sql.Null[T]`、指针表示可空。
 - 不需要实现任何接口，`TableName()` 可选（默认 snake_case 复数）。
 
 ### 3.2 代码生成类型化描述符
@@ -101,27 +101,29 @@ type Order struct {
 
 ```go
 var U = struct {
-    xdb.Table[User]
+    xdb.Table
     ID        xdb.NumberCol[int64]
     Name      xdb.StringCol
     Email     xdb.StringCol
     Age       xdb.NumberCol[int]
     Status    xdb.NumberCol[int8]
     CreatedAt xdb.TimeCol
-    Orders    xdb.HasMany[User, Order]
-}{ /* ... */ }
+}{}
 
 var O = struct { /* 同上 */ }{}
+
+// 以及 func init() 中的描述符初始化与零反射扫描器 (*User).NewRowScanner。
+// 关联字段（xdb:"rel:has_many,..."）不生成描述符，按名字预加载：Preload("Orders")。
 ```
 
 列类型分族，让每种列只暴露合理的方法：
 
 | 类型 | 额外方法 |
 |---|---|
-| `Col[T]`（通用） | `Eq Ne In NotIn IsNull IsNotNull Asc Desc As` 以及 `EqExpr` 等列/表达式比较 |
-| `NumberCol[T]` | `Gt Ge Lt Le Between` + `Add Sub Mul Incr` |
-| `StringCol` | `Like ILike HasPrefix Contains` |
-| `TimeCol` | `Gt Lt Between Before After` |
+| `Col[T]`（通用） | `Eq Ne Gt Ge Lt Le Between In NotIn IsNull IsNotNull Asc Desc As`、列间比较 `EqCol` 等、子查询 `InSub`，赋值 `To ToExpr ToNull` |
+| `NumberCol[T]` | 额外 `Add Sub Mul Div`（表达式）与 `Incr Decr`（赋值） |
+| `StringCol` | 额外 `Like NotLike ILike HasPrefix HasSuffix Contains` |
+| `TimeCol` | 额外 `Before After` |
 
 **不用代码生成的退路**（原型、脚本、动态表）：
 
@@ -163,13 +165,13 @@ type Executor interface {
 ```go
 // 插入：自动回填自增主键（PG 用 RETURNING，MySQL 用 LastInsertId）
 u := &User{Name: "tom", Email: "t@x.com"}
-err := xdb.Insert(db, u).Exec(ctx)
+_, err := xdb.Insert(db, u).Exec(ctx)
 
-// 批量插入：自动按方言参数上限分批（PG 65535 / MySQL max_allowed_packet）
-err = xdb.InsertMany(db, users).Batch(500).Exec(ctx)
+// 批量插入：自动按方言参数上限分批（两种方言均为每条语句 65535 个占位符）
+_, err = xdb.InsertMany(db, users).Batch(500).Exec(ctx)
 
 // Upsert：统一 API，方言翻译为 ON CONFLICT / ON DUPLICATE KEY UPDATE
-err = xdb.Insert(db, u).OnConflict(U.Email).DoUpdate(U.Name, U.Age).Exec(ctx)
+_, err = xdb.Insert(db, u).OnConflict(U.Email).DoUpdate(U.Name, U.Age).Exec(ctx)
 
 // 查询
 list, err := xdb.Query[User](db).
@@ -181,7 +183,7 @@ list, err := xdb.Query[User](db).
 one, err := xdb.Query[User](db).Where(U.ID.Eq(1)).One(ctx)   // 无记录 → xdb.ErrNotFound
 n,   err := xdb.Query[User](db).Where(U.Status.Eq(1)).Count(ctx)
 ok,  err := xdb.Query[User](db).Where(U.Email.Eq(e)).Exists(ctx)
-ids, err := xdb.Pluck(xdb.Query[User](db).Where(...), U.ID)   // []int64
+ids, err := xdb.Pluck(ctx, xdb.Query[User](db).Where(...), U.ID)   // []int64
 
 // 流式遍历（Go 1.23 iter）
 for u, err := range xdb.Query[User](db).Iter(ctx) { ... }
@@ -193,8 +195,8 @@ affected, err := xdb.Update[User](db).
     Exec(ctx)
 
 // 按主键更新整个模型 / 指定列
-err = xdb.UpdateModel(db, u).Exec(ctx)                         // 全部非主键列
-err = xdb.UpdateModel(db, u).Columns(U.Name, U.Age).Exec(ctx)  // 仅指定列
+_, err = xdb.UpdateModel(db, u).Exec(ctx)                // 全部非主键列
+_, err = xdb.UpdateModel(db, u, U.Name, U.Age).Exec(ctx)  // 仅指定列
 
 // 删除
 _, err = xdb.Delete[User](db).Where(U.ID.Eq(1)).Exec(ctx)
@@ -335,10 +337,10 @@ sql, args, err := xdb.Query[User](db).Where(...).ToSQL()
 
 ```go
 err := db.Tx(ctx, func(ctx context.Context, tx *xdb.Tx) error {
-    if err := xdb.Insert(tx, &order).Exec(ctx); err != nil {
+    if _, err := xdb.Insert(tx, &order).Exec(ctx); err != nil {
         return err
     }
-    _, err := xdb.Update[User](tx).Set(U.Balance.Sub(order.Amount)).
+    _, err := xdb.Update[User](tx).Set(U.Balance.Decr(order.Amount)).
         Where(U.ID.Eq(order.UserID), U.Balance.Ge(order.Amount)).
         Exec(ctx)
     return err
@@ -471,7 +473,7 @@ type Dialect interface {
 ```go
 errors.Is(err, xdb.ErrNotFound)
 errors.Is(err, xdb.ErrUniqueViolation)   // MySQL 1062 / PG 23505
-errors.Is(err, xdb.ErrForeignKey)        // 1452,1451 / 23503
+errors.Is(err, xdb.ErrForeignKeyViolation) // 1452,1451 / 23503
 errors.Is(err, xdb.ErrDeadlock)
 errors.Is(err, xdb.ErrSerialization)
 var de *xdb.DBError; errors.As(err, &de) // 原始驱动错误、SQL、约束名

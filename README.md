@@ -55,7 +55,8 @@ err := db.Tx(ctx, func(ctx context.Context, tx *xdb.Tx) error {
 ```
 
 - panic 自动回滚并重新抛出；ctx 取消不会提交
-- 死锁 / 序列化失败自动重试（需显式开启）
+- 死锁 / 序列化失败自动重试（需显式开启）；即使闭包吞掉了死锁错误，事务也不会被提交，
+  而是返回可重试的 `xdb.ErrTxAborted`（MySQL 死锁会回滚整个事务，继续写入会变成逐条自动提交）
 - 提交结果不确定时返回 `xdb.ErrCommitUnknown`
 - 事务被并发使用、结果集未关闭又执行语句、在事务中误用 `db` 均可被检测
 
@@ -98,15 +99,15 @@ xdb.Query[User](db).Where(
 
 // 写入：显式 Set，绝不做零值推断
 u := &User{Name: "tom", Age: 20}
-err := xdb.Insert(db, u).Exec(ctx)                       // 自增主键回填（PG RETURNING / MySQL LastInsertId）
-err = xdb.InsertMany(db, users).Batch(500).Exec(ctx)     // 自动按方言参数上限分批
-err = xdb.Insert(db, u).OnConflict(U.Email).DoUpdate(U.Name, U.Age).Exec(ctx)
+_, err := xdb.Insert(db, u).Exec(ctx)                    // 自增主键回填（PG RETURNING / MySQL LastInsertId）
+_, err = xdb.InsertMany(db, users).Batch(500).Exec(ctx)  // 自动按方言参数上限分批
+_, err = xdb.Insert(db, u).OnConflict(U.Email).DoUpdate(U.Name, U.Age).Exec(ctx)
 
 affected, err := xdb.Update[User](db).
 	Set(U.Name.To("jerry"), U.Age.Incr(1)).
 	Where(U.ID.Eq(1)).
 	Exec(ctx)
-err = xdb.UpdateModel(db, u, U.Name, U.Age).Where(U.Version.Eq(v)).Exec(ctx) // 乐观锁
+n, err := xdb.UpdateModel(db, u, U.Name, U.Age).Where(U.Version.Eq(v)).Exec(ctx) // 乐观锁：n == 0 表示版本已变
 _, err = xdb.Delete[User](db).Where(U.ID.Eq(1)).Exec(ctx)
 ```
 

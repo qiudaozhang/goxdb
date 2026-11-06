@@ -58,6 +58,13 @@ type Tx struct {
 	spSeq         int  // 仅根事务使用：savepoint 序号
 	afterCommit   []func()
 	afterRollback []func()
+	// aborted 仅根事务使用：服务端已经回滚了整个事务（如 MySQL 死锁）时记录原因。
+	// 此后事务只能回滚：语句、savepoint 与提交都返回包裹该原因的 ErrTxAborted。
+	aborted error
+	// cause 记录本层（事务或 savepoint）中首个死锁 / 序列化失败。PostgreSQL 此后的语句
+	// 只报 "transaction is aborted"（25P02），附上它才能让 TxRetry 识别为可重试。
+	// savepoint 回滚时随之丢弃。
+	cause error
 }
 
 // Dialect 返回方言。
@@ -377,10 +384,52 @@ func (t *Tx) usableLocked() error {
 	if t.state != txActive || t.root.state != txActive {
 		return ErrTxDone
 	}
+	if t.root.aborted != nil {
+		return abortedErr(t.root.aborted)
+	}
 	if t.child != nil {
 		return ErrTxChildActive
 	}
 	return nil
+}
+
+// abortedErr 包裹服务端回滚事务的原因：既能 errors.Is(err, ErrTxAborted)，
+// 也保留原始错误（如 ErrDeadlock），使 TxRetry 仍能识别为可重试。
+func abortedErr(cause error) error {
+	return fmt.Errorf("%w: %w", ErrTxAborted, cause)
+}
+
+// noteErr 检查事务内语句的错误：若方言在这类错误下会回滚整个事务，
+// 把根事务标记为中止。否则调用方吞掉错误后继续执行，后续语句会在自动提交模式下
+// 各自生效，而最终的 COMMIT 却报告成功——部分写入被当作完整事务。
+//
+// 返回值是可能附上了先前死锁 / 序列化失败原因的 err（见 Tx.cause）。
+func (t *Tx) noteErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	r := t.root
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if IsRetryable(err) {
+		if errors.Is(err, ErrDeadlock) && t.db.d.Features().DeadlockRollsBackTx {
+			if r.aborted == nil && r.state == txActive {
+				r.aborted = err
+			}
+		} else if t.cause == nil {
+			t.cause = err
+		}
+		return err
+	}
+	return withCause(err, t.cause)
+}
+
+// withCause 给 ErrTxAborted 附上导致中止的可重试错误（若有且尚未包含）。
+func withCause(err, cause error) error {
+	if cause == nil || !errors.Is(err, ErrTxAborted) || IsRetryable(err) {
+		return err
+	}
+	return fmt.Errorf("%w (caused by: %w)", err, cause)
 }
 
 // control 执行事务控制语句（SAVEPOINT 等），绕过占位符处理。
@@ -473,7 +522,8 @@ func (c *Tx) rollbackSavepoint(ctx context.Context) error {
 		r.mu.Unlock()
 		return nil
 	}
-	rootActive := r.state == txActive
+	// 服务端已回滚整个事务时 savepoint 也不存在了（MySQL 会报 SAVEPOINT does not exist）。
+	rootActive := r.state == txActive && r.aborted == nil
 	busy := r.busy
 	if rootActive && !busy {
 		r.busy = true
@@ -483,7 +533,7 @@ func (c *Tx) rollbackSavepoint(ctx context.Context) error {
 	var err error
 	switch {
 	case !rootActive:
-		// 根事务已结束，savepoint 随之失效，无需也无法回滚。
+		// 根事务已结束或已被服务端回滚，savepoint 随之失效，无需也无法回滚。
 	case busy:
 		err = ErrTxConcurrentUse
 	default:
@@ -529,6 +579,11 @@ func (t *Tx) commit() error {
 		r.mu.Unlock()
 		return t.rollbackWith(ErrTxChildActive)
 	}
+	if r.aborted != nil {
+		cause := r.aborted
+		r.mu.Unlock()
+		return t.rollbackWith(abortedErr(cause))
+	}
 	r.state = txCommitting
 	r.mu.Unlock()
 
@@ -558,7 +613,7 @@ func (t *Tx) commit() error {
 			// 服务端明确拒绝了提交：事务未生效。
 			r.state = txRolledBack
 			callbacks = r.afterRollback
-			result = t.db.wrapErr(err, "COMMIT")
+			result = withCause(t.db.wrapErr(err, "COMMIT"), r.cause)
 		} else {
 			r.state = txUnknown
 			result = fmt.Errorf("%w: %w", ErrCommitUnknown, err)
