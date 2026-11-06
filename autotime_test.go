@@ -135,3 +135,45 @@ func TestAutoTimeToSQLDoesNotStamp(t *testing.T) {
 		t.Fatalf("ToSQL must not stamp: %v", a.CreatedAt)
 	}
 }
+
+// 数据库最多存微秒：Linux 上 time.Now 带纳秒与单调时钟，不截断时模型里的值与读回的值不相等。
+// 自动填充的时间（插入与 UpdateModel，含 WithClock 注入的时钟）都截断到微秒。
+func TestAutoTimeTruncatedToMicroseconds(t *testing.T) {
+	nano := time.Date(2026, 2, 3, 4, 5, 6, 123456789, time.UTC)
+	want := time.Date(2026, 2, 3, 4, 5, 6, 123456000, time.UTC)
+	var args [][]any
+	db, _ := newDB(t, func(q string, a []any) (*fakedb.Result, error) {
+		args = append(args, a)
+		return &fakedb.Result{Columns: []string{"id"}, Rows: [][]any{{int64(1)}}}, nil
+	}, xdb.WithClock(func() time.Time { return nano }))
+
+	a := &Article{Title: "hello"}
+	if _, err := xdb.Insert(db, a).Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a.CreatedAt != want || a.UpdatedAt != want {
+		t.Fatalf("insert: model not truncated: %v / %v", a.CreatedAt, a.UpdatedAt)
+	}
+	if got := args[0][1].(time.Time); got != want {
+		t.Fatalf("insert: bound %v, want %v", got, want)
+	}
+
+	if _, err := xdb.UpdateModel(db, a).Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a.UpdatedAt != want {
+		t.Fatalf("update: model not truncated: %v", a.UpdatedAt)
+	}
+
+	// 默认时钟（time.Now）也去掉单调时钟读数与亚微秒部分
+	db2, _ := newDB(t, func(q string, a []any) (*fakedb.Result, error) {
+		return &fakedb.Result{Columns: []string{"id"}, Rows: [][]any{{int64(1)}}}, nil
+	})
+	b := &Article{Title: "x"}
+	if _, err := xdb.Insert(db2, b).Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b.CreatedAt.Nanosecond()%1000 != 0 || b.CreatedAt != b.CreatedAt.Round(0) {
+		t.Fatalf("default clock not truncated: %v", b.CreatedAt)
+	}
+}

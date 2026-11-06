@@ -12,6 +12,13 @@
   大小写写错会提示正确写法。迁移：按错误信息改成合法选项（`pk`、`auto`、`autoCreateTime`、`autoUpdateTime`、
   `softDelete`，关联字段 `rel`、`fk`），或删掉不起作用的选项（如 `unique`）。
 
+### 修复
+
+- 自动时间戳（`autoCreateTime` / `autoUpdateTime`）截断到微秒并去掉单调时钟读数。Linux 上 `time.Now` 带纳秒，
+  而 MySQL `DATETIME(6)` / PostgreSQL `TIMESTAMP` 只存微秒，原先插入后模型里的时间与读回的值不相等
+  （`==` / `Equal` 比较、缓存键、乐观锁条件都会受影响）。`WithClock` 注入的时钟同样截断。
+  注意 MySQL 不带小数位的 `DATETIME` 会四舍五入到秒，需要精确往返请用 `DATETIME(6)`。
+
 ### 文档
 
 - README 新增标签选项表；pkg.go.dev 上新增可运行示例（查询构建、动态条件、事务、upsert、错误判断）。

@@ -236,7 +236,7 @@ func (q *InsertQ[T]) now() time.Time {
 	if q.ex != nil {
 		return q.ex.session(false).db.now()
 	}
-	return time.Now()
+	return time.Now().Truncate(time.Microsecond)
 }
 
 // chunkSize 计算每条语句的行数：VALUES 的参数加上冲突子句自带的参数

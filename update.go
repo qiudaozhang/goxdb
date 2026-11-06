@@ -284,7 +284,7 @@ func (q *UpdateQ[T]) now() time.Time {
 	if q.ex != nil {
 		return q.ex.session(false).db.now()
 	}
-	return time.Now()
+	return time.Now().Truncate(time.Microsecond)
 }
 
 // DeleteQ 是 DELETE 语句，不可变。

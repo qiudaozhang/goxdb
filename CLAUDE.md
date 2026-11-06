@@ -23,6 +23,14 @@ cd benchmark && go test -bench . -benchmem            # 独立 module，与 sqlx
 CI（`.github/workflows/ci.yml`）在 push main / PR 时运行：gofmt、`go mod tidy` 无差异、vet（含 integration 标签与 benchmark module）、
 `-race` 单元测试，然后对 MySQL 8.4 / PostgreSQL 17 跑集成测试。CI 设置 `XDB_REQUIRE_DB=1`，数据库不可达时测试失败而不是跳过。
 只改文档（`*.md`、`docs/`）不触发。
+CI 跑在 Linux（`time.Now` 带纳秒，macOS 只有微秒）与 `go.mod` 声明的最低 Go 版本上。本地复现 CI：
+
+```bash
+docker compose up -d --wait && docker run --rm --network goxdb_default -v "$PWD":/src -w /src -v goxdb-gomod:/go/pkg/mod \
+  -e XDB_REQUIRE_DB=1 -e XDB_MYSQL_DSN='root:xdb@tcp(mysql:3306)/xdb?parseTime=true' \
+  -e XDB_PG_DSN='postgres://postgres:xdb@postgres:5432/xdb?sslmode=disable' \
+  golang:1.25 go test -tags integration -race -count=1 ./tests/integration/...
+```
 
 ## 目录速览
 

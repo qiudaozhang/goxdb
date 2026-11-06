@@ -86,8 +86,15 @@ func WithPool(p Pool) Option { return func(o *options) { o.pool = &p } }
 func WithStrictTx() Option { return func(o *options) { o.strictTx = true } }
 
 // WithClock 替换框架读取“当前时间”的方式，影响 autoCreateTime / autoUpdateTime 的填充。
-// 默认为 time.Now，测试中可注入固定时钟使写入结果可预测。
+// 默认为 time.Now，测试中可注入固定时钟使写入结果可预测。返回值同样会被截断到微秒。
 func WithClock(now func() time.Time) Option { return func(o *options) { o.now = now } }
+
+// microClock 把时钟截断到微秒并去掉单调时钟读数：MySQL DATETIME(6) / PostgreSQL TIMESTAMP
+// 最多存微秒，而 Linux 上 time.Now 带纳秒。不截断时，自动填充后模型里的值与读回的值不相等，
+// 用 == 或 Equal 比较、做缓存键或乐观锁条件都会出错。
+func microClock(now func() time.Time) func() time.Time {
+	return func() time.Time { return now().Truncate(time.Microsecond) }
+}
 
 // Open 按方言名打开数据库。方言需要先通过导入方言包注册，例如：
 //
@@ -121,6 +128,7 @@ func New(std *sql.DB, d dialect.Dialect, opts ...Option) *DB {
 	if o.now == nil {
 		o.now = time.Now
 	}
+	o.now = microClock(o.now)
 	if p := o.pool; p != nil {
 		if p.MaxOpen > 0 {
 			std.SetMaxOpenConns(p.MaxOpen)
