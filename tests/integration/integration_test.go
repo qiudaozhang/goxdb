@@ -75,6 +75,11 @@ func forEachDB(t *testing.T, fn func(t *testing.T, db *xdb.DB)) {
 			)`)
 			mustExec(t, db, "INSERT INTO accounts (id, name, balance) VALUES (?, ?, ?), (?, ?, ?)", 1, "alice", 100, 2, "bob", 100)
 			fn(t, db)
+			// ctx 取消后 database/sql 在后台 goroutine（Tx.awaitDone）中回滚并归还连接，
+			// Commit 不等它完成就返回，因此给一点宽限期；真正的泄漏一秒后仍不会归零。
+			for deadline := time.Now().Add(time.Second); db.Stats().InUse != 0 && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
 			if n := db.Stats().InUse; n != 0 {
 				t.Errorf("connection leak: %d connections in use", n)
 			}
