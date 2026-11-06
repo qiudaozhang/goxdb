@@ -23,6 +23,9 @@ type Dialect interface {
 	Placeholder(n int) string
 	// QuoteIdent 为单个标识符（表名/列名/别名）加引号。
 	QuoteIdent(name string) string
+	// AppendIdent 与 QuoteIdent 等价，但把结果追加到 dst 并返回。
+	// 构建器走这条路径可以避免每个标识符都产生一个临时字符串。
+	AppendIdent(dst []byte, name string) []byte
 	// Syntax 返回安全扫描原始 SQL 文本所需的词法规则。
 	Syntax() Syntax
 	// Features 描述方言支持的 SQL 特性，构建器据此生成不同的语句。

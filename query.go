@@ -6,6 +6,7 @@ import (
 	"iter"
 	"reflect"
 	"slices"
+	"sync"
 
 	"github.com/qiudaozhang/goxdb/dialect"
 	"github.com/qiudaozhang/goxdb/internal/schema"
@@ -81,10 +82,40 @@ func Query[T any](ex Executor) *Q[T] {
 	tbl := Table{name: m.Table, model: m}
 	q.c.from = tbl
 	q.softDelete = m.SoftDelete
-	for _, f := range m.Fields {
-		q.c.cols = append(q.c.cols, colNode{src: tbl, name: f.Column})
-	}
+	q.c.cols = allColumns(tbl, m)
 	return q
+}
+
+// colList 是模型全部列的渲染模板：colNode 是值类型且源表相同，
+// 因此同一模型的所有 Query 可以共享一份切片。
+type colList struct {
+	cols []Node
+}
+
+var colLists sync.Map // *schema.Model -> *colList
+
+// allColumns 返回模型全部列的选择列表。
+//
+// 切片只读复用：选择列表在构建过程中从不被修改（Where/OrderBy 等只增删自身字段），
+// 因此 Query[T] 不必每次重新构造 15 个 colNode。这消除了热路径上的一批分配。
+func allColumns(tbl Table, m *schema.Model) []Node {
+	// 无别名时才能共享：带别名的表需要不同的限定符。
+	if tbl.alias != "" {
+		cols := make([]Node, 0, len(m.Fields))
+		for _, f := range m.Fields {
+			cols = append(cols, colNode{src: tbl, name: f.Column})
+		}
+		return cols
+	}
+	if v, ok := colLists.Load(m); ok {
+		return v.(*colList).cols
+	}
+	cols := make([]Node, 0, len(m.Fields))
+	for _, f := range m.Fields {
+		cols = append(cols, colNode{src: tbl, name: f.Column})
+	}
+	actual, _ := colLists.LoadOrStore(m, &colList{cols: cols})
+	return actual.(*colList).cols
 }
 
 // Select 构造自定义投影的查询，结果按列名（或别名）映射到 T。

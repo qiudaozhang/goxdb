@@ -25,17 +25,43 @@ type builder struct {
 	sb   strings.Builder
 	args []any
 	err  error
+	// identBuf 是 ident 的中转缓冲，避免每个标识符一个临时字符串。
+	identBuf []byte
+	// phBuf 是 Placeholder 的中转缓冲（PostgreSQL 的 $n 需要格式化）。
+	phBuf []byte
 }
 
 func newBuilder(d dialect.Dialect) *builder { return &builder{d: d} }
 
 func (b *builder) write(s string) { b.sb.WriteString(s) }
 
-func (b *builder) ident(s string) { b.sb.WriteString(b.d.QuoteIdent(s)) }
+// ident 把标识符写入输出缓冲。
+//
+// 走方言的 AppendIdent 而不是 QuoteIdent：后者每个标识符都会产生一个临时字符串，
+// 一次查询十几个列名就会贡献十几次分配。这里直接追加到 strings.Builder 的缓冲里。
+func (b *builder) ident(s string) {
+	// Builder 没有可写的字节切片访问器，只能借一个复用的缓冲中转。
+	b.identBuf = b.d.AppendIdent(b.identBuf[:0], s)
+	b.sb.Write(b.identBuf)
+}
 
 func (b *builder) arg(v any) {
 	b.args = append(b.args, v)
-	b.sb.WriteString(b.d.Placeholder(len(b.args)))
+	// PostgreSQL 的占位符是 "$" + strconv.Itoa(n)，会分配；
+	// MySQL 返回常量 "?"，走 WriteString 不会分配。
+	b.phBuf = appendPlaceholder(b.d, b.phBuf[:0], len(b.args))
+	b.sb.Write(b.phBuf)
+}
+
+// appendPlaceholder 把第 n 个占位符写入 dst。
+// 占位符只有 "$<digits>"（PostgreSQL）与 "?"（MySQL）两种形态，
+// 直接拼接可以绕开 strconv.Itoa 的字符串分配。
+func appendPlaceholder(d dialect.Dialect, dst []byte, n int) []byte {
+	p := d.Placeholder(n)
+	if len(p) == 1 {
+		return append(dst, p[0])
+	}
+	return append(dst, p...)
 }
 
 func (b *builder) int(n int64) { b.sb.WriteString(strconv.FormatInt(n, 10)) }
@@ -136,14 +162,27 @@ func (n prefixNode) build(b *builder) {
 }
 
 // groupNode：(a AND b AND c)。
+//
+// 为避免每次渲染都分配一份 []Node，groupNode 可以直接持有一段连续的 Cond 切片
+// （conds 非空时用它，否则用 items）。
 type groupNode struct {
 	op    string
 	items []Node
+	conds []Cond
 }
 
 func (n groupNode) build(b *builder) {
 	b.write("(")
-	b.nodes(n.items, " "+n.op+" ")
+	if n.conds != nil {
+		for i, c := range n.conds {
+			if i > 0 {
+				b.write(" " + n.op + " ")
+			}
+			b.node(c)
+		}
+	} else {
+		b.nodes(n.items, " "+n.op+" ")
+	}
 	b.write(")")
 }
 

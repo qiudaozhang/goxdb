@@ -55,6 +55,17 @@ func (mysqlDialect) QuoteIdent(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }
 
+func (mysqlDialect) AppendIdent(dst []byte, s string) []byte {
+	dst = append(dst, '`')
+	for i := 0; i < len(s); i++ {
+		if s[i] == '`' {
+			dst = append(dst, '`')
+		}
+		dst = append(dst, s[i])
+	}
+	return append(dst, '`')
+}
+
 func (mysqlDialect) Features() dialect.Features {
 	return dialect.Features{
 		Upsert:              dialect.UpsertOnDuplicateKey,

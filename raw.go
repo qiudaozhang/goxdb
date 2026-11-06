@@ -216,8 +216,8 @@ func scanOne(ctx context.Context, s stmt, dst reflect.Value) error {
 }
 
 type cursor struct {
-	rows *Rows
-	plan *scan.Plan
+	rows    *Rows
+	scanner scan.RowScanner
 }
 
 func openCursor(ctx context.Context, s stmt, t reflect.Type) (*cursor, error) {
@@ -235,10 +235,10 @@ func openCursor(ctx context.Context, s stmt, t reflect.Type) (*cursor, error) {
 		_ = rows.Close()
 		return nil, err
 	}
-	return &cursor{rows: rows, plan: plan}, nil
+	return &cursor{rows: rows, scanner: plan.Scanner()}, nil
 }
 
-func (c *cursor) scan(dst reflect.Value) error { return c.plan.ScanRow(c.rows, dst) }
+func (c *cursor) scan(dst reflect.Value) error { return c.scanner.ScanRow(c.rows, dst) }
 
 // close 关闭结果集并合并错误：优先返回调用方传入的错误，其次是迭代错误，最后是关闭错误。
 func (c *cursor) close(err error) error {

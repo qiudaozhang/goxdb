@@ -120,18 +120,36 @@ func And(cs ...Cond) Cond { return group("AND", cs) }
 // Or 组合条件，零值条件被忽略；全部为零值时返回零值。
 func Or(cs ...Cond) Cond { return group("OR", cs) }
 
+// group 组合条件。所有条件都非零时直接复用调用方的切片，避免为每次
+// 渲染都分配一份 []Node：构建器只读表达式树，从不在原地修改切片。
+//
+// 切片会被截断容量（三索引切片），使调用方后续 append 不会写进查询里；
+// 但调用方仍不应在传入后原地改动元素 —— 与其它接受切片的 API 约定一致。
 func group(op string, cs []Cond) Cond {
-	var items []Node
+	nz := 0
+	var single Cond
+	for _, c := range cs {
+		if !c.IsZero() {
+			nz++
+			single = c
+		}
+	}
+	switch nz {
+	case 0:
+		return Cond{}
+	case 1:
+		return single
+	}
+	if nz == len(cs) {
+		// 无零值：直接把调用方的切片挂到 groupNode 上，渲染时逐项遍历，
+		// 不需要额外分配一份 []Node。
+		return wrap[bool](groupNode{op: op, conds: cs[:len(cs):len(cs)]})
+	}
+	items := make([]Node, 0, nz)
 	for _, c := range cs {
 		if !c.IsZero() {
 			items = append(items, c)
 		}
-	}
-	switch len(items) {
-	case 0:
-		return Cond{}
-	case 1:
-		return items[0].(Cond)
 	}
 	return wrap[bool](groupNode{op: op, items: items})
 }
