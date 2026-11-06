@@ -3,6 +3,23 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 `v0.x` 阶段的次版本号升级可能包含不兼容变更，届时会在「不兼容变更」一节列出迁移方法。
 
+## [v0.1.1] - 2026-11-05
+
+事务正确性修复，建议所有 v0.1.0 用户升级（无 API 变更）。
+
+### 修复
+
+- 事务：MySQL 死锁会回滚**整个**事务，此后连接处于自动提交模式。闭包吞掉死锁错误继续执行时，
+  后续写入原先会各自提交，而 `db.Tx` 却返回成功（部分写入被当作完整事务）。现在事务被标记为中止：
+  后续语句、savepoint 与提交都返回包裹死锁原因的 `ErrTxAborted`，事务回滚；配合 `TxRetry` 会整体重试。
+- 事务：PostgreSQL 中吞掉死锁 / 序列化失败后，后续语句只报「事务已中止」（25P02）。现在该错误附带
+  先前的原因，`TxRetry` 能识别并重试。savepoint 内的死锁回滚后外层照常继续，行为不变。
+
+### 文档
+
+- 修正 README / DESIGN 中无法编译的示例（`Exec` 返回两个值、`Pluck` 需要 ctx、`UpdateModel` 指定列的写法、
+  `Decr` 等），以及与实现不符的描述符示例和列方法表。
+
 ## [v0.1.0] - 2026-11-05
 
 首个发布版本，以 MIT 许可证发布。一等支持 MySQL 8+ 与 PostgreSQL 14+，需要 Go 1.25+。
@@ -67,4 +84,5 @@
   `timetz` / `interval` 映射为驱动真正能扫描进去的类型。
 - 手动事务 `Commit` 失败后会回滚并归还连接。
 
+[v0.1.1]: https://github.com/qiudaozhang/goxdb/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/qiudaozhang/goxdb/releases/tag/v0.1.0
