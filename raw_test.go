@@ -39,6 +39,12 @@ func newDB(t *testing.T, h fakedb.Handler, opts ...xdb.Option) (*xdb.DB, *fakedb
 	f := fakedb.New(h)
 	db := xdb.New(f.Open(), postgres.Dialect, opts...)
 	t.Cleanup(func() {
+		// ctx 取消时 database/sql 在后台 goroutine 里回滚并归还连接（awaitDone），
+		// 可能稍晚于测试结束；给它一点时间，真正的泄漏会一直占着。
+		deadline := time.Now().Add(time.Second)
+		for db.Stats().InUse != 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
 		if n := db.Stats().InUse; n != 0 {
 			t.Errorf("connection leak: %d in use", n)
 		}
