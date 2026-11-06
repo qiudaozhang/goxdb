@@ -505,3 +505,7 @@ Upsert、事务、并发读写、纯渲染），MySQL 与 PostgreSQL 各一轮�
 - **MySQL 上 bun 快 1.5–2 倍**来自驱动参数插值，加 `interpolateParams=true` 后四者持平
 - **PG 上 bun 插入慢 2 倍**来自它的 `RETURNING *` 设计
 - **`goxdb gen` 零反射扫描**：隔离测量下扫描本身快 19%，真实库里批量读约 4%
+
+## 许可证
+
+[MIT](LICENSE)
