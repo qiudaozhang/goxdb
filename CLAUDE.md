@@ -41,11 +41,11 @@ cd benchmark && go test -bench . -benchmem            # 独立 module，与 sqlx
 
 ## 文件稳定性标记（避免每次全量扫描）
 
-**基线提交：`0af4eb9`**（2026-11-05 全量审查 + 修复后复审）。
+**基线提交：`9594609`**（2026-11-05 全量审查；codegen、reverse、introspect、benchmark 已复审）。
 
 使用规则：
 1. 🟢 文件**默认不必通读**，除非任务直接修改它或调试指向它。看接口用 `grep -n "^func \|^type "` 即可。
-2. 若 `git log 0af4eb9.. -- <file>` 非空，或 `git diff 0af4eb9 -- <file>` 有改动，
+2. 若 `git log 9594609.. -- <file>` 非空，或 `git diff 9594609 -- <file>` 有改动，
    该文件的标记**失效**，按 🟡 对待；重新审查后更新本表与基线。
 3. 🟡 文件改动前先读「注意事项」，避免重复踩坑或重复排查。
 
@@ -55,18 +55,19 @@ cd benchmark && go test -bench . -benchmem            # 独立 module，与 sqlx
 `db.go` `tx.go` `metrics.go` `insertselect.go` `window.go` `func.go` `query.go` `raw.go` `insert.go` `scanhook.go`
 `internal/sqlbind/*` `internal/fakedb/*` `internal/schema/*` `internal/scan/*`
 `dialect/dialect.go` `dialect/mysql/mysql.go` `dialect/postgres/postgres.go` `dialect/my/*` `dialect/pg/*`
-`cmd/goxdb/main.go`
+`cmd/goxdb/main.go` `internal/reverse/*` `dialect/*/introspect.go`
 
 ### 🟡 注意事项（改动相关区域前先看）
 
 | 文件 | 注意事项 |
 |---|---|
-| `internal/codegen/codegen.go` | 嵌入字段展开**必须与 `schema.walk` 同规则**（同名列层级最浅者胜、同层歧义全丢、跳过未导出嵌入指针），否则生成扫描器与运行时列集不一致；`codegen` 的 `TestEmbeddedFields` 与 `schema` 的 `TestEmbeddedConflictsMatchCodegen` 用同一组模型互相对照，改一边要同步另一边。生成器只收带 `xdb` 标签的字段，而运行时收全部导出字段——无标签字段的模型会回退到反射扫描（安全但慢） |
+| `internal/codegen/codegen.go` | 列集**必须与 `schema.walk` 同规则**：导出字段无标签也是列（`xdb:"-"` 排除）、嵌入字段递归展开、同名列层级最浅者胜、同层时显式列名唯一者胜否则全丢、跳过未导出嵌入指针。`parity_test.go` 编译生成代码并断言运行时列集被生成扫描器接受——改规则时先跑它。描述符变量名冲突时回退 `<Type>Table`（`varNames`） |
 | `preload.go` | 关联键经 `relKey` 归一化（解引用指针、展开 `driver.Valuer`）；子表软删除过滤跟随主查询的 `Unscoped()` |
 | `update.go` | 软删除 DELETE 渲染为 `UPDATE ... WHERE <col> IS NULL AND ...`，重复删除影响 0 行；带 Join 时与 `UpdateQ.Join` 共用 `buildUpdateTarget` / `buildUpdateJoinFrom` |
 | `insert.go` / `internal/scan` / `scanhook.go` | 写入嵌入字段前用 `schema.AllocEmbedded(v, m.EmbedPtrs)` 分配 nil 嵌入指针；新增写字段的路径要照做 |
+| `dialect/*/introspect.go` | 类型映射以「驱动真能扫进去」为准：`TIME`/`YEAR`/`money`/`timetz`/`interval` 等不映射为 `time.Time` 或浮点。新增映射时扩充集成测试 `TestReverseTypesScan` |
+| `benchmark/` | 灌数与每个场景清理后都要 `analyzeTables`：MySQL 统计信息过期会让计划慢 3 倍且随机落在某个框架上 |
 
 ### ⚪ 未深入审查
 
-`internal/reverse/*`、`dialect/*/introspect.go`、
-`benchmark/`、`tests/integration/`。需要改动时按常规审查。
+`tests/integration/`（测试代码，按需阅读）。
