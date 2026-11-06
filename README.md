@@ -214,9 +214,32 @@ var U = struct {
 	Age       xdb.NumberCol[int]
 	CreatedAt xdb.TimeCol
 }{}
+
+// 零反射扫描器：把列顺序与字段地址固定在编译期。
+func (u *User) NewRowScanner(columns []string) (xdb.ScanRows, error) { ... }
 ```
 
 列类型由 Go 字段类型决定，因此 `U.Age.Eq("abc")` **编译失败**。
+
+#### 零反射扫描
+
+生成器还会为每个模型生成 `NewRowScanner`，实现 `xdb.RowScanner`。
+框架检测到该方法后，逐行扫描不再经过反射——直接把结果列写进 `&u.Field`：
+
+```go
+users, err := xdb.All[User](ctx, xdb.Query[User](db).Where(U.Age.Ge(18)))
+// User 有生成代码时自动走零反射路径，否则回退到反射，API 完全一致
+```
+
+- 列名与顺序不匹配（例如自定义投影）时**自动回退**到反射路径，
+  因此 `Select[DTO]`、`Pluck`、部分列查询都不受影响
+- 未生成代码的类型同样走反射，无需一次性迁移
+- 实测（fake 驱动，90 行扫描）：`19200ns → 15600ns`，**约 19% 提速**，
+  每行省去 `reflect.Value.Field` 取址与接口装箱
+
+在真实数据库上这部分收益会被网络往返淹没（单行查询约 110μs，
+扫描只占其中约 0.6μs），批量读与高 QPS 场景才明显。
+对比数据见 [benchmark/README.md](benchmark/README.md)。
 
 ### 关联预加载
 
@@ -440,8 +463,26 @@ go test -run '^$' -fuzz FuzzBind -fuzztime 30s ./internal/sqlbind/
 go test -run '^$' -fuzz FuzzBuilder -fuzztime 30s .
 ```
 
-基准（假驱动，隔离网络与服务端，反映框架自身开销）：
+基准分两套：
 
 ```bash
+# 框架自身开销：假驱动，隔离网络与服务端
 go test -run XXX -bench . ./...
+
+# 端到端：与 sqlx / GORM / bun 在同一连接池、同一张表上对比
+docker compose up -d --wait
+cd benchmark && go test -run XXX -bench . -benchtime 1s -count 3 ./...
 ```
+
+对比结果、口径说明与解读见 [benchmark/README.md](benchmark/README.md)。
+
+覆盖 13 个场景（单行/批量读、分页、计数、预加载、JOIN 聚合、单条/批量写、
+Upsert、事务、并发读写、纯渲染），MySQL 与 PostgreSQL 各一轮。一句话结论：
+
+- **真实往返主导一切**：PostgreSQL 上 xdb 与最优实现普遍相差 5% 以内
+- **纯 SQL 生成**：xdb 0.60μs，与 bun 同档，比 GORM（1.20μs）快一倍
+- **分配**：单行读 55 次（优化前 80）；批量读 459 次，低于 sqlx 的 635 与 GORM 的 972
+- **唯一短板**：JOIN 聚合慢 16–25%，因为表达式树多一层遍历
+- **MySQL 上 bun 快 1.5–2 倍**来自驱动参数插值，加 `interpolateParams=true` 后四者持平
+- **PG 上 bun 插入慢 2 倍**来自它的 `RETURNING *` 设计
+- **`goxdb gen` 零反射扫描**：隔离测量下扫描本身快 19%，真实库里批量读约 4%
