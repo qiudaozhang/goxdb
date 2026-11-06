@@ -372,6 +372,10 @@ xdb.Query[Doc](db).Where(
 )
 ```
 
+键名与 JSON 片段作为常量内联进 SQL（与生成列 / 函数索引上的表达式逐字一致），已按方言转义：
+MySQL 中非标识符键名写成 `$."first-name"`，含反斜杠的常量改为绑定参数（不受 `NO_BACKSLASH_ESCAPES` 影响）。
+它们应来自代码常量，不要拼接用户输入。`pg.Array(...).Contains()` / `Overlaps()` 不带元素时分别恒真 / 恒假。
+
 ### 软删除
 
 ```go

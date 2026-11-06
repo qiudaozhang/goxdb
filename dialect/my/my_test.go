@@ -1,6 +1,7 @@
 package my_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -57,14 +58,36 @@ func TestMyMatch(t *testing.T) {
 	}
 }
 
+// 键名：标识符原样；其它加双引号（内部 " 与 \ 转义）；含反斜杠的常量改为绑定参数，
+// 以免受 NO_BACKSLASH_ESCAPES 影响。真实 MySQL 上的行为见集成测试 TestBuilderDialectPackages。
 func TestMyPathEscaping(t *testing.T) {
 	tb := xdb.TableOf[Doc]()
 	meta := xdb.CStr(tb, "meta")
-	got, _, err := xdb.Query[Doc](nil).Where(my.JSON(meta).Text(`a"b`).Eq("v")).SQL(mysql.Dialect)
+	for _, c := range []struct {
+		key, frag string
+		args      []any
+	}{
+		{"status", "JSON_EXTRACT(`docs`.`meta`, '$.status')", []any{"v"}},
+		{"first-name", "JSON_EXTRACT(`docs`.`meta`, '$.\"first-name\"')", []any{"v"}},
+		{"it's", "JSON_EXTRACT(`docs`.`meta`, '$.\"it''s\"')", []any{"v"}},
+		{"9lives", "JSON_EXTRACT(`docs`.`meta`, '$.\"9lives\"')", []any{"v"}},
+		{`a"b`, "JSON_EXTRACT(`docs`.`meta`, ?)", []any{`$."a\"b"`, "v"}},
+		{`a\b`, "JSON_EXTRACT(`docs`.`meta`, ?)", []any{`$."a\\b"`, "v"}},
+	} {
+		got, args, err := xdb.Query[Doc](nil).Where(my.JSON(meta).Text(c.key).Eq("v")).SQL(mysql.Dialect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, c.frag) || !reflect.DeepEqual(args, c.args) {
+			t.Errorf("key %q:\n got: %s %#v\nwant: ...%s... %#v", c.key, got, args, c.frag, c.args)
+		}
+	}
+
+	got, args, err := xdb.Query[Doc](nil).Where(my.JSON(meta).Field("a").Contains(`{"p":"C:\\d"}`)).SQL(mysql.Dialect)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `$.a\"b`) {
-		t.Fatalf("path must escape double quote: %s", got)
+	if !strings.Contains(got, "JSON_CONTAINS(`docs`.`meta`, ?, '$.a')") || !reflect.DeepEqual(args, []any{`{"p":"C:\\d"}`}) {
+		t.Errorf("contains: %s %#v", got, args)
 	}
 }

@@ -735,6 +735,22 @@ func TestBuilderDialectPackages(t *testing.T) {
 		}
 		mustExec(t, db, `INSERT INTO json_docs (meta) VALUES (?)`, `{"status":"active","n":1}`)
 		mustExec(t, db, `INSERT INTO json_docs (meta) VALUES (?)`, `{"status":"archived","n":2}`)
+		// 特殊键名与含反斜杠的值：键名要按 JSON 路径规则加引号，字面量要按方言转义
+		mustExec(t, db, `INSERT INTO json_docs (meta) VALUES (?)`,
+			`{"status":"odd","first-name":"x","say \"hi\"":"y","back\\slash":"z","it's":"q","path":"C:\\dir"}`)
+		oddKeys := func(t *testing.T, text func(string) xdb.E[string], contains func(string) xdb.Cond) {
+			t.Helper()
+			for key, want := range map[string]string{"first-name": "x", `say "hi"`: "y", `back\slash`: "z", "it's": "q", "path": `C:\dir`} {
+				n, err := xdb.Query[JSONDoc](db).Where(text(key).Eq(want)).Count(ctx)
+				if err != nil || n != 1 {
+					t.Errorf("text(%q) = %q: %d %v", key, want, n, err)
+				}
+			}
+			n, err := xdb.Query[JSONDoc](db).Where(contains(`{"path":"C:\\dir"}`)).Count(ctx)
+			if err != nil || n != 1 {
+				t.Errorf("contains with backslash: %d %v", n, err)
+			}
+		}
 
 		tb := xdb.TableOf[JSONDoc]()
 		meta := xdb.CStr(tb, "meta")
@@ -752,6 +768,16 @@ func TestBuilderDialectPackages(t *testing.T) {
 			if err != nil || n != 1 {
 				t.Fatalf("pg @>: %d %v", n, err)
 			}
+			oddKeys(t, pg.JSONB(meta).Text, pg.JSONB(meta).Contains)
+
+			// 空元素列表：包含空集恒真，与空集相交恒假（ARRAY[] 在 PG 中无法推断类型）
+			arr := pg.Array(xdb.Lit[[]int64]("ARRAY[1,2]::bigint[]"))
+			if n, err := xdb.Query[JSONDoc](db).Where(arr.Contains()).Count(ctx); err != nil || n != 3 {
+				t.Errorf("pg empty contains: %d %v", n, err)
+			}
+			if n, err := xdb.Query[JSONDoc](db).Where(arr.Overlaps()).Count(ctx); err != nil || n != 0 {
+				t.Errorf("pg empty overlaps: %d %v", n, err)
+			}
 			return
 		}
 		n, err := xdb.Query[JSONDoc](db).Where(my.JSON(meta).Text("status").Eq("active")).Count(ctx)
@@ -766,6 +792,7 @@ func TestBuilderDialectPackages(t *testing.T) {
 		if err != nil || n != 1 {
 			t.Fatalf("mysql JSON_CONTAINS: %d %v", n, err)
 		}
+		oddKeys(t, my.JSON(meta).Text, my.JSON(meta).Contains)
 	})
 }
 

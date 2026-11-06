@@ -71,12 +71,20 @@ func (a ArrayExpr) Any(elem xdb.Node) xdb.Cond {
 }
 
 // Contains 判断数组是否包含全部元素：arr @> ARRAY[...]。
+// 没有元素时渲染为 arr @> '{}'（恒真；ARRAY[] 在 PostgreSQL 中无法推断类型）。
 func (a ArrayExpr) Contains(elems ...xdb.Node) xdb.Cond {
+	if len(elems) == 0 {
+		return xdb.SQL[bool]("? @> '{}'", a.col)
+	}
 	return xdb.SQL[bool]("? @> ARRAY[?]", a.col, elements(elems))
 }
 
 // Overlaps 判断数组与给定元素是否有交集：arr && ARRAY[...]。
+// 没有元素时渲染为 arr && '{}'（恒假）。
 func (a ArrayExpr) Overlaps(elems ...xdb.Node) xdb.Cond {
+	if len(elems) == 0 {
+		return xdb.SQL[bool]("? && '{}'", a.col)
+	}
 	return xdb.SQL[bool]("? && ARRAY[?]", a.col, elements(elems))
 }
 
@@ -92,12 +100,9 @@ func quote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// elements 把多个节点拼成 ARRAY[...] 的元素列表。用 SQL 片段的 "?" 内嵌渲染，
-// 从而复用核心的参数编号与引号逻辑。
+// elements 把多个节点拼成 ARRAY[...] 的元素列表（至少一个）。用 SQL 片段的 "?"
+// 内嵌渲染，从而复用核心的参数编号与引号逻辑。
 func elements(ns []xdb.Node) xdb.Node {
-	if len(ns) == 0 {
-		return xdb.Lit[xdb.Node]("")
-	}
 	frag := strings.TrimSuffix(strings.Repeat("?, ", len(ns)), ", ")
 	args := make([]any, len(ns))
 	for i, n := range ns {

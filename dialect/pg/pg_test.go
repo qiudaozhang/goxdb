@@ -90,3 +90,19 @@ func TestPGQuoteEscaping(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// 空元素列表不能渲染成 ARRAY[]（PostgreSQL 无法推断类型），改用无类型的 '{}'。
+func TestPGArrayEmpty(t *testing.T) {
+	_, _, tags := docCols()
+	got, args, err := xdb.Query[Doc](nil).Where(
+		pg.Array(tags).Contains(),
+		pg.Array(tags).Overlaps(),
+	).SQL(postgres.Dialect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT "docs"."id", "docs"."meta", "docs"."tags" FROM "docs" WHERE ("docs"."tags" @> '{}' AND "docs"."tags" && '{}')`
+	if got != want || len(args) != 0 {
+		t.Fatalf("sql:\n got %s %#v\nwant %s", got, args, want)
+	}
+}
