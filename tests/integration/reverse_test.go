@@ -40,7 +40,7 @@ func TestReverseFromRealSchema(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := db.PingContext(ctx); err != nil {
-				t.Skipf("database not reachable (%v); run docker compose up -d --wait", err)
+				unreachable(t, err)
 			}
 
 			mustExecRaw(t, ctx, db, "DROP TABLE IF EXISTS reverse_demo")
@@ -146,7 +146,7 @@ func TestReverseTypesScan(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := db.PingContext(ctx); err != nil {
-				t.Skipf("database not reachable (%v)", err)
+				unreachable(t, err)
 			}
 			mustExecRaw(t, ctx, db, "DROP TABLE IF EXISTS reverse_types")
 			mustExecRaw(t, ctx, db, ddl)

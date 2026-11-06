@@ -1,5 +1,8 @@
 # goxdb
 
+[![CI](https://github.com/qiudaozhang/goxdb/actions/workflows/ci.yml/badge.svg)](https://github.com/qiudaozhang/goxdb/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/qiudaozhang/goxdb.svg)](https://pkg.go.dev/github.com/qiudaozhang/goxdb)
+
 优雅、易用、事务严谨的 Go 通用数据库框架，一等支持 MySQL 8+ 与 PostgreSQL 14+。
 
 > 当前进度：**M0** 地基、**M1** 查询构建器、**M2**（代码生成、关联预加载、模型回调、自动时间戳、

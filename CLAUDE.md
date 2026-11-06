@@ -20,6 +20,10 @@ docker compose up -d --wait && go test -tags integration ./tests/integration/...
 cd benchmark && go test -bench . -benchmem            # 独立 module，与 sqlx/GORM/bun 对比
 ```
 
+CI（`.github/workflows/ci.yml`）在 push main / PR 时运行：gofmt、`go mod tidy` 无差异、vet（含 integration 标签与 benchmark module）、
+`-race` 单元测试，然后对 MySQL 8.4 / PostgreSQL 17 跑集成测试。CI 设置 `XDB_REQUIRE_DB=1`，数据库不可达时测试失败而不是跳过。
+只改文档（`*.md`、`docs/`）不触发。
+
 ## 目录速览
 
 | 路径 | 职责 |

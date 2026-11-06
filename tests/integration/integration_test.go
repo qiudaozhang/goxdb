@@ -37,6 +37,16 @@ func env(k, def string) string {
 	return def
 }
 
+// unreachable 在数据库不可达时跳过测试；设置 XDB_REQUIRE_DB=1（CI 中）时改为失败，
+// 避免服务没起来却显示全部通过。
+func unreachable(t *testing.T, err error) {
+	t.Helper()
+	if os.Getenv("XDB_REQUIRE_DB") != "" {
+		t.Fatalf("database not reachable: %v", err)
+	}
+	t.Skipf("database not reachable (%v); run docker compose up -d --wait", err)
+}
+
 var targets = []struct{ dialect, dsn string }{
 	{"mysql", env("XDB_MYSQL_DSN", "root:xdb@tcp(127.0.0.1:13306)/xdb?parseTime=true")},
 	{"postgres", env("XDB_PG_DSN", "postgres://postgres:xdb@127.0.0.1:15432/xdb?sslmode=disable")},
@@ -52,7 +62,7 @@ func forEachDB(t *testing.T, fn func(t *testing.T, db *xdb.DB)) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := db.Ping(ctx); err != nil {
-				t.Skipf("database not reachable (%v); run docker compose up -d --wait", err)
+				unreachable(t, err)
 			}
 			mustExec(t, db, "DROP TABLE IF EXISTS accounts")
 			mustExec(t, db, `CREATE TABLE accounts (
