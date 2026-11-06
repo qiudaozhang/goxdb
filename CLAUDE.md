@@ -41,11 +41,11 @@ cd benchmark && go test -bench . -benchmem            # 独立 module，与 sqlx
 
 ## 文件稳定性标记（避免每次全量扫描）
 
-**基线提交：`74e5197`**（2026-11-05 全量审查；codegen、reverse、introspect、benchmark、window 已复审）。
+**基线提交：`65f390b`**（2026-11-05 全量审查；codegen、reverse、introspect、benchmark、window、codegen 嵌入与 import 已复审）。
 
 使用规则：
 1. 🟢 文件**默认不必通读**，除非任务直接修改它或调试指向它。看接口用 `grep -n "^func \|^type "` 即可。
-2. 若 `git log 74e5197.. -- <file>` 非空，或 `git diff 74e5197 -- <file>` 有改动，
+2. 若 `git log 65f390b.. -- <file>` 非空，或 `git diff 65f390b -- <file>` 有改动，
    该文件的标记**失效**，按 🟡 对待；重新审查后更新本表与基线。
 3. 🟡 文件改动前先读「注意事项」，避免重复踩坑或重复排查。
 
