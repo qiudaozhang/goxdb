@@ -218,6 +218,9 @@ func scanOne(ctx context.Context, s stmt, dst reflect.Value) error {
 type cursor struct {
 	rows    *Rows
 	scanner scan.RowScanner
+	// hook 非 nil 时优先用它扫描：模型实现了 xdb.RowScanner（由 goxdb gen 生成），
+	// 可以跳过整个反射路径。
+	hook scanHook
 }
 
 func openCursor(ctx context.Context, s stmt, t reflect.Type) (*cursor, error) {
@@ -230,6 +233,9 @@ func openCursor(ctx context.Context, s stmt, t reflect.Type) (*cursor, error) {
 		_ = rows.Close()
 		return nil, err
 	}
+	if h, ok := newScanHook(t); ok && h.bind(cols) {
+		return &cursor{rows: rows, hook: h}, nil
+	}
 	plan, err := scan.NewPlan(t, cols, s.strict)
 	if err != nil {
 		_ = rows.Close()
@@ -238,7 +244,12 @@ func openCursor(ctx context.Context, s stmt, t reflect.Type) (*cursor, error) {
 	return &cursor{rows: rows, scanner: plan.Scanner()}, nil
 }
 
-func (c *cursor) scan(dst reflect.Value) error { return c.scanner.ScanRow(c.rows, dst) }
+func (c *cursor) scan(dst reflect.Value) error {
+	if c.hook != nil {
+		return c.hook.ScanRow(c.rows, dst)
+	}
+	return c.scanner.ScanRow(c.rows, dst)
+}
 
 // close 关闭结果集并合并错误：优先返回调用方传入的错误，其次是迭代错误，最后是关闭错误。
 func (c *cursor) close(err error) error {
