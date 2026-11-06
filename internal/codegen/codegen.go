@@ -211,6 +211,7 @@ type colCand struct {
 	depth int    // 嵌入层级，模型自身字段为 0
 	path  string // 嵌入路径拼接名（如 "Base"），用于描述符改名
 	pk    bool
+	named bool // 标签里显式写了列名（冲突消解时优先）
 }
 
 // extractModel 把结构体转换为列与关联描述。没有 xdb 标签时返回 false：
@@ -252,8 +253,19 @@ func extractModel(name string, st *ast.StructType, idx structIndex) (ModelInfo, 
 				best = append(best, c)
 			}
 		}
-		if len(best) == 1 { // 生成器只看带标签的字段，同层多个即为歧义
+		if len(best) == 1 {
 			kept = append(kept, best[0])
+			continue
+		}
+		// 同层多个时，显式写了列名的唯一一个胜出（与 schema.dominant 相同）。
+		var named []colCand
+		for _, c := range best {
+			if c.named {
+				named = append(named, c)
+			}
+		}
+		if len(named) == 1 {
+			kept = append(kept, named[0])
 		}
 	}
 
@@ -304,25 +316,30 @@ func collect(st *ast.StructType, idx structIndex, sel, path string, depth int, v
 			delete(visiting, typ)
 			continue
 		}
-		if !hasTag || !ast.IsExported(field.Names[0].Name) {
+		goName := field.Names[0].Name
+		if !ast.IsExported(goName) {
 			continue
 		}
-		tagged = true
+		// 与运行时一致：导出字段即使没有标签也是列（列名取 snake_case）；
+		// 不想映射的字段要显式写 xdb:"-"。是否算模型仍只看有没有出现过 xdb 标签。
+		if hasTag {
+			tagged = true
+		}
 		colName, opts := splitTag(tag)
-		goName := field.Names[0].Name
 		if kind, isRel := opts["rel"]; isRel {
 			if rels != nil { // 嵌入结构体里的关联不提升到上层模型
 				*rels = append(*rels, Rel{GoName: goName, Kind: kind, FK: opts["fk"]})
 			}
 			continue
 		}
+		named := colName != ""
 		if colName == "" {
 			colName = schema.SnakeCase(goName)
 		}
 		c := newColumn(goName, colName, field.Type)
 		c.Sel = sel + goName
 		_, pk := opts["pk"]
-		*out = append(*out, colCand{c: c, depth: depth, path: path, pk: pk})
+		*out = append(*out, colCand{c: c, depth: depth, path: path, pk: pk, named: named})
 	}
 	return tagged
 }
@@ -451,8 +468,9 @@ func Render(pkg string, models []ModelInfo) ([]byte, error) {
 	fmt.Fprintf(&b, "package %s\n\n", pkg)
 	fmt.Fprintf(&b, "import (\n\t\"fmt\"\n\n\txdb \"github.com/qiudaozhang/goxdb\"\n)\n\n")
 
+	names := varNames(models)
 	for _, m := range models {
-		v := varName(m.Name)
+		v := names[m.Name]
 		fmt.Fprintf(&b, "// %s 是 %s 的类型化表描述符。\n", v, m.Name)
 		fmt.Fprintf(&b, "var %s = struct {\n\txdb.Table\n", v)
 		for _, c := range m.Columns {
@@ -468,7 +486,7 @@ func Render(pkg string, models []ModelInfo) ([]byte, error) {
 	}
 
 	for _, m := range models {
-		v := varName(m.Name)
+		v := names[m.Name]
 		fmt.Fprintf(&b, "func init() {\n")
 		fmt.Fprintf(&b, "\t%s.Table = xdb.TableOf[%s]()\n", v, m.Name)
 		for _, c := range m.Columns {
@@ -554,4 +572,25 @@ func varName(name string) string {
 		return name + "Table"
 	}
 	return v
+}
+
+// varNames 为每个模型选定描述符变量名。短名（varName）在多个模型间重复，
+// 或与某个模型的类型名相同时，这些模型都改用 <Type>Table，保证生成代码能编译。
+// 结果只取决于模型集合本身，与解析顺序无关。
+func varNames(models []ModelInfo) map[string]string {
+	count := map[string]int{}
+	types := map[string]bool{}
+	for _, m := range models {
+		count[varName(m.Name)]++
+		types[m.Name] = true
+	}
+	out := make(map[string]string, len(models))
+	for _, m := range models {
+		v := varName(m.Name)
+		if count[v] > 1 || (types[v] && v != m.Name+"Table") {
+			v = m.Name + "Table"
+		}
+		out[m.Name] = v
+	}
+	return out
 }

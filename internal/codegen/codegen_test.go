@@ -24,7 +24,8 @@ type User struct {
 	Email     *string   ` + "`xdb:\"email\"`" + `
 	Age       int       ` + "`xdb:\"age\"`" + `
 	CreatedAt time.Time ` + "`xdb:\"created_at\"`" + `
-	Ignored   string
+	Ignored   string    ` + "`xdb:\"-\"`" + `
+	Nickname  string
 	Orders    []Order ` + "`xdb:\"rel:has_many,fk:user_id\"`" + `
 }
 
@@ -71,7 +72,7 @@ func TestParseDir(t *testing.T) {
 	for _, c := range u.Columns {
 		cols = append(cols, c.Column)
 	}
-	if got, want := strings.Join(cols, ","), "id,name,email,age,created_at"; got != want {
+	if got, want := strings.Join(cols, ","), "id,name,email,age,created_at,nickname"; got != want {
 		t.Fatalf("columns = %s, want %s", got, want)
 	}
 	if len(u.Rels) != 1 || u.Rels[0].Kind != "has_many" || u.Rels[0].FK != "user_id" {
@@ -97,6 +98,7 @@ func TestColumnKinds(t *testing.T) {
 		"email":      "xdb.StringCol", // *string 按值类型归类
 		"age":        "xdb.NumberCol[int]",
 		"created_at": "xdb.TimeCol",
+		"nickname":   "xdb.StringCol", // 无标签的导出字段与运行时一样是列
 	}
 	for _, c := range u.Columns {
 		if got := colType(c); got != want[c.Column] {
@@ -172,5 +174,19 @@ func TestRenderIsValidGo(t *testing.T) {
 	}
 	if string(src) != string(src2) {
 		t.Fatal("Render must be deterministic")
+	}
+}
+
+// 短名冲突时，冲突的模型都改用 <Type>Table；不冲突的保持短名。
+func TestVarNamesCollision(t *testing.T) {
+	got := varNames([]ModelInfo{{Name: "PArticle"}, {Name: "PAudit"}, {Name: "User"}, {Name: "U"}})
+	want := map[string]string{"PArticle": "PArticleTable", "PAudit": "PAuditTable", "User": "UserTable", "U": "UTable"}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s -> %s, want %s", k, got[k], v)
+		}
+	}
+	if got := varNames([]ModelInfo{{Name: "User"}, {Name: "Order"}}); got["User"] != "U" || got["Order"] != "O" {
+		t.Errorf("no collision should keep short names: %v", got)
 	}
 }
