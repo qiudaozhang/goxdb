@@ -190,3 +190,36 @@ func TestVarNamesCollision(t *testing.T) {
 		t.Errorf("no collision should keep short names: %v", got)
 	}
 }
+
+func TestGuessPkgName(t *testing.T) {
+	for in, want := range map[string]string{
+		"database/sql":              "sql",
+		"encoding/json":             "json",
+		"github.com/jackc/pgx/v5":   "pgx",
+		"gopkg.in/yaml.v3":          "yaml",
+		"github.com/google/uuid":    "uuid",
+		"github.com/shopspring/dec": "dec",
+	} {
+		if got := guessPkgName(in); got != want {
+			t.Errorf("guessPkgName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 列类型引用的包无法从导入路径推断名字时，报错而不是生成无法编译的代码。
+func TestUnresolvedColumnPackage(t *testing.T) {
+	dir := t.TempDir()
+	writeModel(t, dir, `package model
+
+import "example.com/go-money"
+
+type Item struct {
+	ID    int64       `+"`xdb:\"id,pk\"`"+`
+	Price money.Value `+"`xdb:\"price\"`"+`
+}
+`)
+	_, _, err := ParseDir(dir)
+	if err == nil || !strings.Contains(err.Error(), `Item: field Price: cannot resolve package "money"`) {
+		t.Fatalf("err = %v", err)
+	}
+}

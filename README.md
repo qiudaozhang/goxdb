@@ -224,6 +224,13 @@ func (u *User) NewRowScanner(columns []string) (xdb.ScanRows, error) { ... }
 嵌入结构体（值或导出的指针，如 `Base` / `*Base`）会被展开，描述符沿用 Go 的字段提升：
 `Base.ID` 生成为 `U.ID`；与模型自身的字段重名时改为 `U.BaseID`。同名列的取舍与运行时一致——
 层级最浅者胜出，同层重复则都不作为列。嵌入的 `*Base` 为 nil 时，扫描与主键回填会自动分配。
+与运行时一样，非结构体类型、实现 `sql.Scanner` 的结构体（含 `time.Time`、`sql.NullString`）以及
+标签写了列名的嵌入字段算作**一列**而不展开。列类型引用其它包（如 `sql.NullString`、`json.RawMessage`）时，
+生成文件会带上对应的 import。
+
+生成器只解析语法树，看不到**其它包里结构体**的字段：嵌入这样的结构体时，生成器会打印警告，
+已知列照常生成描述符，但该模型不生成 `NewRowScanner`（扫描走反射，结果正确）。
+需要零反射扫描时，把这些字段写在本包的结构体里再嵌入。
 
 #### 零反射扫描
 

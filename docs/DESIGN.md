@@ -97,7 +97,7 @@ type Order struct {
 
 ### 3.2 代码生成类型化描述符
 
-`go generate` 调用 `goxdb gen ./model`，生成 `model/xdb_gen.go`：
+`go generate` 调用 `go run github.com/qiudaozhang/goxdb/cmd/goxdb -dir ./model`（全部选项都是标志，多余的位置参数会报错），生成 `model/xdb_gen.go`：
 
 ```go
 var U = struct {

@@ -11,7 +11,9 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -25,6 +27,9 @@ type Config struct {
 	Dir string // 包含模型源码的目录
 	Pkg string // 生成的包名；为空时沿用目录中的包名
 	Out string // 输出文件名，默认 xdb_gen.go
+	// Warn 接收不影响生成但需要用户知道的提示（例如某个模型无法生成零反射扫描器）。
+	// 为 nil 时写到 os.Stderr。
+	Warn io.Writer
 }
 
 // ModelInfo 是从源码中解析出的一个模型。
@@ -34,6 +39,9 @@ type ModelInfo struct {
 	Columns []Column // 列描述符；顺序与模型字段一致
 	Rels    []Rel    // 关联
 	HasPK   bool
+	// Warnings 非空表示生成器看不全模型的列集（例如嵌入了外部包的结构体）：
+	// 仍生成已知列的描述符，但不生成 NewRowScanner，扫描直接走反射。
+	Warnings []string
 }
 
 // Column 是一个列的生成信息。
@@ -43,6 +51,8 @@ type Column struct {
 	Column string // 列名
 	Kind   string // xdb.NumberCol / xdb.StringCol / xdb.TimeCol / xdb.Col
 	Type   string // 类型参数（仅 Col[T] 与 NumberCol[T] 使用）
+	// Imports 是 Type 中用到的包：限定符 -> 导入路径（仅 xdb.Col 需要）。
+	Imports map[string]string
 }
 
 // Rel 是一个关联的生成信息。
@@ -60,6 +70,15 @@ func Run(cfg Config) error {
 	models, pkg, err := ParseDir(cfg.Dir)
 	if err != nil {
 		return err
+	}
+	warn := cfg.Warn
+	if warn == nil {
+		warn = os.Stderr
+	}
+	for _, m := range models {
+		for _, w := range m.Warnings {
+			fmt.Fprintf(warn, "goxdb: warning: %s: %s\n", m.Name, w)
+		}
 	}
 	if cfg.Pkg != "" {
 		pkg = cfg.Pkg
@@ -103,22 +122,32 @@ func ParseDir(dir string) ([]ModelInfo, string, error) {
 		files = append(files, f)
 	}
 	// 按整个包提取：嵌入的结构体与 TableName() 方法可能定义在别的文件里。
-	models := extract(files)
+	models, err := extract(files)
+	if err != nil {
+		return nil, "", err
+	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	return models, pkg, nil
 }
 
 // extract 从一个包的全部文件里提取模型。
-func extract(files []*ast.File) []ModelInfo {
-	// 先收集 TableName() 的返回值（用于覆盖表名推导）与包内结构体索引（用于展开嵌入字段）。
+func extract(files []*ast.File) ([]ModelInfo, error) {
+	// 先收集 TableName() 的返回值（用于覆盖表名推导）、包内类型索引（用于展开嵌入字段）
+	// 以及带 Scan 方法的类型（运行时把它们当作标量列而不展开）。
 	tables := map[string]string{}
-	idx := structIndex{}
+	idx := pkgIndex{types: map[string]typeDecl{}, scanners: map[string]bool{}}
 	for _, f := range files {
+		imports := fileImports(f)
 		for _, d := range f.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				if name, table, ok := tableNameMethod(d); ok {
 					tables[name] = table
+				}
+				if d.Name.Name == "Scan" && d.Recv != nil && len(d.Recv.List) > 0 {
+					if r := receiverName(d.Recv.List[0].Type); r != "" {
+						idx.scanners[r] = true
+					}
 				}
 			case *ast.GenDecl:
 				if d.Tok != token.TYPE {
@@ -126,9 +155,7 @@ func extract(files []*ast.File) []ModelInfo {
 				}
 				for _, spec := range d.Specs {
 					if ts, ok := spec.(*ast.TypeSpec); ok {
-						if st, ok := ts.Type.(*ast.StructType); ok {
-							idx[ts.Name.Name] = st
-						}
+						idx.types[ts.Name.Name] = typeDecl{spec: ts, imports: imports}
 					}
 				}
 			}
@@ -137,6 +164,7 @@ func extract(files []*ast.File) []ModelInfo {
 
 	var out []ModelInfo
 	for _, f := range files {
+		imports := fileImports(f)
 		for _, d := range f.Decls {
 			gd, ok := d.(*ast.GenDecl)
 			if !ok || gd.Tok != token.TYPE {
@@ -144,14 +172,17 @@ func extract(files []*ast.File) []ModelInfo {
 			}
 			for _, spec := range gd.Specs {
 				ts, ok := spec.(*ast.TypeSpec)
-				if !ok {
+				if !ok || ts.TypeParams != nil {
 					continue
 				}
 				st, ok := ts.Type.(*ast.StructType)
 				if !ok {
 					continue
 				}
-				m, ok := extractModel(ts.Name.Name, st, idx)
+				m, ok, err := extractModel(ts.Name.Name, st, imports, idx)
+				if err != nil {
+					return nil, err
+				}
 				if !ok {
 					continue
 				}
@@ -164,7 +195,53 @@ func extract(files []*ast.File) []ModelInfo {
 			}
 		}
 	}
-	return out
+	return out, nil
+}
+
+// fileImports 返回文件里的导入：限定符 -> 路径。
+// 无别名时按惯例从路径推断包名（去掉 /vN 与 .vN 后缀）；点导入与空白导入忽略。
+func fileImports(f *ast.File) map[string]string {
+	m := map[string]string{}
+	for _, im := range f.Imports {
+		p, err := strconv.Unquote(im.Path.Value)
+		if err != nil {
+			continue
+		}
+		name := ""
+		if im.Name != nil {
+			name = im.Name.Name
+		} else {
+			name = guessPkgName(p)
+		}
+		if name == "_" || name == "." {
+			continue
+		}
+		m[name] = p
+	}
+	return m
+}
+
+func guessPkgName(p string) string {
+	base := path.Base(p)
+	if len(base) > 1 && base[0] == 'v' && isDigits(base[1:]) && path.Dir(p) != "." {
+		base = path.Base(path.Dir(p))
+	}
+	if i := strings.LastIndex(base, ".v"); i > 0 && isDigits(base[i+2:]) {
+		base = base[:i]
+	}
+	return base
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // tableNameMethod 识别形如 func (T) TableName() string { return "x" } 的方法。
@@ -202,8 +279,80 @@ func receiverName(e ast.Expr) string {
 	return ""
 }
 
-// structIndex 是包内结构体定义的索引，用于展开嵌入字段。
-type structIndex map[string]*ast.StructType
+// typeDecl 是包内的一个类型声明及其所在文件的导入表。
+type typeDecl struct {
+	spec    *ast.TypeSpec
+	imports map[string]string
+}
+
+// pkgIndex 是包内类型的索引，用于判断嵌入字段该展开还是当作单列。
+type pkgIndex struct {
+	types    map[string]typeDecl
+	scanners map[string]bool // 声明了 Scan 方法的类型（实现 sql.Scanner，运行时视为标量）
+}
+
+// embedKind 是嵌入字段在运行时 schema 中的处理方式。
+type embedKind int
+
+const (
+	embedScalar  embedKind = iota // 当作单列（schema.IsScalar 为真）
+	embedStruct                   // 递归展开其字段
+	embedUnknown                  // 外部包的结构体：只靠语法树无法得知字段
+)
+
+// classify 按 schema.walk 的规则判断嵌入类型 e：非结构体与实现 sql.Scanner 的
+// 结构体（含 time.Time、sql.Null*）是标量列，其余结构体展开。
+func (p pkgIndex) classify(e ast.Expr, imports map[string]string, depth int) (embedKind, *ast.StructType, map[string]string) {
+	if depth > 16 {
+		return embedUnknown, nil, nil
+	}
+	switch t := e.(type) {
+	case *ast.StarExpr:
+		return p.classify(t.X, imports, depth+1)
+	case *ast.ParenExpr:
+		return p.classify(t.X, imports, depth+1)
+	case *ast.Ident:
+		d, ok := p.types[t.Name]
+		if !ok {
+			return embedScalar, nil, nil // 预声明类型
+		}
+		if p.scanners[t.Name] {
+			return embedScalar, nil, nil
+		}
+		if d.spec.TypeParams != nil {
+			return embedUnknown, nil, nil
+		}
+		switch u := d.spec.Type.(type) {
+		case *ast.StructType:
+			return embedStruct, u, d.imports
+		case *ast.Ident, *ast.SelectorExpr, *ast.StarExpr, *ast.ParenExpr, *ast.IndexExpr, *ast.IndexListExpr:
+			// type B A / type B = A：底层类型决定是否展开；
+			// 定义类型不继承方法，这里只在 B 自身检查了 Scan。
+			return p.classify(u, d.imports, depth+1)
+		}
+		return embedScalar, nil, nil // 切片、映射、函数等
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		if !ok {
+			return embedUnknown, nil, nil
+		}
+		switch imp := imports[pkg.Name]; {
+		case imp == "time" && t.Sel.Name == "Time":
+			return embedScalar, nil, nil
+		case imp == "database/sql" && strings.HasPrefix(t.Sel.Name, "Null"):
+			return embedScalar, nil, nil
+		}
+		return embedUnknown, nil, nil
+	case *ast.IndexExpr: // 泛型实例，如 sql.Null[int64]
+		if k, _, _ := p.classify(t.X, imports, depth+1); k == embedScalar {
+			if _, isSel := t.X.(*ast.SelectorExpr); isSel {
+				return embedScalar, nil, nil
+			}
+		}
+		return embedUnknown, nil, nil
+	}
+	return embedUnknown, nil, nil
+}
 
 // colCand 是展开过程中的候选列，冲突消解规则与运行时 schema 一致。
 type colCand struct {
@@ -223,12 +372,16 @@ type colCand struct {
 //
 // 描述符字段名沿用 Go 的字段提升（Base.ID → U.ID）；与其它列的描述符重名时
 // 才加上嵌入路径前缀（U.BaseID）。
-func extractModel(name string, st *ast.StructType, idx structIndex) (ModelInfo, bool) {
+func extractModel(name string, st *ast.StructType, imports map[string]string, idx pkgIndex) (ModelInfo, bool, error) {
 	m := ModelInfo{Name: name}
 	var cands []colCand
-	tagged := collect(st, idx, "", "", 0, map[string]bool{name: true}, &cands, &m.Rels)
+	w := &walker{idx: idx, visiting: map[*ast.StructType]bool{st: true}, out: &cands, warnings: &m.Warnings}
+	tagged := w.collect(st, imports, "", "", 0, &m.Rels)
+	if w.err != nil {
+		return ModelInfo{}, false, fmt.Errorf("%s: %w", name, w.err)
+	}
 	if !tagged {
-		return ModelInfo{}, false
+		return ModelInfo{}, false, nil
 	}
 
 	// 按列名分组，保持首次出现的顺序（与 schema.parse 相同）。
@@ -284,39 +437,68 @@ func extractModel(name string, st *ast.StructType, idx structIndex) (ModelInfo, 
 		m.Columns = append(m.Columns, c.c)
 	}
 	if len(m.Columns) == 0 {
-		return ModelInfo{}, false
+		return ModelInfo{}, false, nil
 	}
-	return m, true
+	return m, true, nil
+}
+
+// walker 是一次模型展开的状态。
+type walker struct {
+	idx      pkgIndex
+	visiting map[*ast.StructType]bool
+	out      *[]colCand
+	warnings *[]string
+	err      error
 }
 
 // collect 遍历结构体字段，把列追加到 out、关联追加到 rels（仅模型自身层级）。
-// sel 是从模型根到 st 的选择器前缀，path 是嵌入路径拼接名。返回是否见到 xdb 标签。
-func collect(st *ast.StructType, idx structIndex, sel, path string, depth int, visiting map[string]bool, out *[]colCand, rels *[]Rel) bool {
+// sel 是从模型根到 st 的选择器前缀，path 是嵌入路径拼接名，imports 是 st 所在文件的导入表。
+// 返回是否见到 xdb 标签。
+func (w *walker) collect(st *ast.StructType, imports map[string]string, sel, path string, depth int, rels *[]Rel) bool {
 	tagged := false
 	for _, field := range st.Fields.List {
 		tag, hasTag := fieldTag(field)
 		if hasTag && tag == "-" {
 			continue
 		}
+		var goName string
 		if len(field.Names) == 0 {
-			// 匿名（嵌入）字段：与 schema.walk 一致，只展开同包可见的结构体；
-			// 未导出的嵌入指针无法由框架分配，运行时会跳过，这里同样跳过。
-			typ := embeddedTypeName(field.Type)
-			sub, ok := idx[typ]
-			if !ok || visiting[typ] || (hasTag && tagName(tag) != "") {
+			// 匿名（嵌入）字段：与 schema.walk 一致——标签里没写列名的结构体递归展开，
+			// 其余（标量类型、实现 sql.Scanner 的结构体、写了列名的嵌入）当作一列。
+			goName = embeddedTypeName(field.Type)
+			if goName == "" {
 				continue
 			}
-			if _, isPtr := field.Type.(*ast.StarExpr); isPtr && !ast.IsExported(typ) {
-				continue
+			if !hasTag || tagName(tag) == "" {
+				kind, sub, subImports := w.idx.classify(field.Type, imports, 0)
+				switch kind {
+				case embedUnknown:
+					if ast.IsExported(goName) || !isPointer(field.Type) {
+						*w.warnings = append(*w.warnings, fmt.Sprintf(
+							"embedded field %s%s: cannot resolve its columns from source "+
+								"(struct from another package?); descriptors omit them and "+
+								"scanning falls back to reflection", sel, typeString(field.Type)))
+					}
+					continue
+				case embedStruct:
+					// 未导出的嵌入指针无法由框架分配，运行时会跳过，这里同样跳过。
+					if isPointer(field.Type) && !ast.IsExported(goName) {
+						continue
+					}
+					if w.visiting[sub] {
+						continue
+					}
+					w.visiting[sub] = true
+					if w.collect(sub, subImports, sel+goName+".", path+goName, depth+1, nil) {
+						tagged = true
+					}
+					delete(w.visiting, sub)
+					continue
+				}
 			}
-			visiting[typ] = true
-			if collect(sub, idx, sel+typ+".", path+typ, depth+1, visiting, out, nil) {
-				tagged = true
-			}
-			delete(visiting, typ)
-			continue
+		} else {
+			goName = field.Names[0].Name
 		}
-		goName := field.Names[0].Name
 		if !ast.IsExported(goName) {
 			continue
 		}
@@ -338,10 +520,51 @@ func collect(st *ast.StructType, idx structIndex, sel, path string, depth int, v
 		}
 		c := newColumn(goName, colName, field.Type)
 		c.Sel = sel + goName
+		if c.Kind == "xdb.Col" {
+			imps, err := typeImports(field.Type, imports)
+			if err != nil {
+				if w.err == nil {
+					w.err = fmt.Errorf("field %s%s: %w", sel, goName, err)
+				}
+				continue
+			}
+			c.Imports = imps
+		}
 		_, pk := opts["pk"]
-		*out = append(*out, colCand{c: c, depth: depth, path: path, pk: pk, named: named})
+		*w.out = append(*w.out, colCand{c: c, depth: depth, path: path, pk: pk, named: named})
 	}
 	return tagged
+}
+
+func isPointer(e ast.Expr) bool { _, ok := e.(*ast.StarExpr); return ok }
+
+// typeImports 找出类型表达式里用到的包限定符并映射到导入路径。
+func typeImports(e ast.Expr, imports map[string]string) (map[string]string, error) {
+	var out map[string]string
+	var err error
+	ast.Inspect(e, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		p, ok := imports[pkg.Name]
+		if !ok {
+			if err == nil {
+				err = fmt.Errorf("cannot resolve package %q; import it with an explicit name", pkg.Name)
+			}
+			return false
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[pkg.Name] = p
+		return false
+	})
+	return out, err
 }
 
 // fieldTag 返回字段的 xdb 标签值。
@@ -362,12 +585,18 @@ func tagName(tag string) string {
 	return name
 }
 
-// embeddedTypeName 返回嵌入字段的类型名；外部包（含选择器）返回空。
+// embeddedTypeName 返回嵌入字段的字段名（即类型名，不含包限定符与类型参数）。
 func embeddedTypeName(e ast.Expr) string {
 	switch t := e.(type) {
 	case *ast.Ident:
 		return t.Name
 	case *ast.StarExpr:
+		return embeddedTypeName(t.X)
+	case *ast.SelectorExpr:
+		return t.Sel.Name
+	case *ast.IndexExpr:
+		return embeddedTypeName(t.X)
+	case *ast.IndexListExpr:
 		return embeddedTypeName(t.X)
 	}
 	return ""
@@ -447,6 +676,14 @@ func typeString(e ast.Expr) string {
 		return "map[" + typeString(t.Key) + "]" + typeString(t.Value)
 	case *ast.InterfaceType:
 		return "any"
+	case *ast.IndexExpr:
+		return typeString(t.X) + "[" + typeString(t.Index) + "]"
+	case *ast.IndexListExpr:
+		args := make([]string, len(t.Indices))
+		for i, x := range t.Indices {
+			args[i] = typeString(x)
+		}
+		return typeString(t.X) + "[" + strings.Join(args, ", ") + "]"
 	}
 	return "any"
 }
@@ -466,7 +703,11 @@ func Render(pkg string, models []ModelInfo) ([]byte, error) {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// Code generated by goxdb. DO NOT EDIT.\n\n")
 	fmt.Fprintf(&b, "package %s\n\n", pkg)
-	fmt.Fprintf(&b, "import (\n\t\"fmt\"\n\n\txdb \"github.com/qiudaozhang/goxdb\"\n)\n\n")
+	imports, err := renderImports(models)
+	if err != nil {
+		return nil, err
+	}
+	b.WriteString(imports)
 
 	names := varNames(models)
 	for _, m := range models {
@@ -482,7 +723,9 @@ func Render(pkg string, models []ModelInfo) ([]byte, error) {
 	// 零反射扫描器：把列顺序与字段地址固定在编译期，
 	// 逐行扫描退化为直接写入 &m.Field，省掉反射取址与接口装箱。
 	for _, m := range models {
-		renderScanner(&b, m)
+		if len(m.Warnings) == 0 {
+			renderScanner(&b, m)
+		}
 	}
 
 	for _, m := range models {
@@ -500,6 +743,53 @@ func Render(pkg string, models []ModelInfo) ([]byte, error) {
 		return nil, fmt.Errorf("format generated source: %w\n%s", err, b.String())
 	}
 	return src, nil
+}
+
+// renderImports 汇总生成文件需要的导入：xdb、扫描器用的 fmt，以及列类型引用的包。
+func renderImports(models []ModelInfo) (string, error) {
+	const xdbPath = "github.com/qiudaozhang/goxdb"
+	want := map[string]string{"xdb": xdbPath}
+	for _, m := range models {
+		if len(m.Warnings) == 0 {
+			want["fmt"] = "fmt"
+		}
+		for _, c := range m.Columns {
+			for q, p := range c.Imports {
+				if prev, ok := want[q]; ok && prev != p {
+					return "", fmt.Errorf("%s.%s: package name %q refers to both %q and %q; use distinct import names", m.Name, c.GoName, q, prev, p)
+				}
+				want[q] = p
+			}
+		}
+	}
+	names := make([]string, 0, len(want))
+	for q := range want {
+		names = append(names, q)
+	}
+	// 标准库一组、其余一组，与 goimports 的习惯一致。
+	std := func(p string) bool { return !strings.Contains(strings.SplitN(p, "/", 2)[0], ".") }
+	sort.Slice(names, func(i, j int) bool {
+		pi, pj := want[names[i]], want[names[j]]
+		if std(pi) != std(pj) {
+			return std(pi)
+		}
+		return pi < pj
+	})
+	var b strings.Builder
+	b.WriteString("import (\n")
+	for i, q := range names {
+		p := want[q]
+		if i > 0 && std(want[names[i-1]]) && !std(p) {
+			b.WriteString("\n")
+		}
+		if q == guessPkgName(p) && q != "xdb" {
+			fmt.Fprintf(&b, "\t%s\n", strconv.Quote(p))
+		} else {
+			fmt.Fprintf(&b, "\t%s %s\n", q, strconv.Quote(p))
+		}
+	}
+	b.WriteString(")\n\n")
+	return b.String(), nil
 }
 
 // renderScanner 为模型生成 xdb.RowScanner 的实现。

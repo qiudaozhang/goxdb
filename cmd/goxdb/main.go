@@ -44,6 +44,12 @@ func main() {
 		suffix = flag.String("suffix", "", "DB-first 模式：从表名中去掉的后缀")
 	)
 	flag.Parse()
+	if flag.NArg() > 0 {
+		// goxdb 只接受标志；多余的位置参数（如误写的子命令 "gen"）会让
+		// flag 停止解析，后面的 -dir 等全部被忽略，生成到错误目录。
+		fmt.Fprintf(os.Stderr, "goxdb: unexpected argument %q (all options are flags; see -h)\n", flag.Arg(0))
+		os.Exit(2)
+	}
 
 	err := run(params{
 		dbName: *dbName, dsn: *dsn, dir: *dir, out: *out, pkg: *pkg,
