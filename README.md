@@ -4,7 +4,7 @@
 
 > 当前进度：**M0** 地基、**M1** 查询构建器、**M2**（代码生成、关联预加载、模型回调、自动时间戳、
 > 多表写、INSERT…SELECT）、**M3**（窗口函数、软删除、方言扩展包、读写分离、DB-first 反向生成）已完成。
-> 设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)。
+> 设计与实现机制见 [docs/DESIGN.md](docs/DESIGN.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 安装
 
