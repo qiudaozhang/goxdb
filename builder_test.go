@@ -516,3 +516,31 @@ func TestQueryExecution(t *testing.T) {
 		t.Fatal(got, err)
 	}
 }
+
+type kv3 struct {
+	K int64 `xdb:"k,pk"`
+	V int64 `xdb:"v"`
+	W int64 `xdb:"w"`
+}
+
+// 分批时要给冲突子句自带的参数留出预算：3 列 × 21845 行 = 65535，
+// 再加 DoUpdateSet 绑定的 1 个值就超过了两种数据库的 65535 上限。
+func TestInsertChunkReservesConflictParams(t *testing.T) {
+	rows := make([]kv3, 21845)
+	tb := xdb.TableOf[kv3]()
+	k, v := xdb.CNum[int64](tb, "k"), xdb.CNum[int64](tb, "v")
+	for _, d := range []dialect.Dialect{mysql.Dialect, postgres.Dialect} {
+		_, args, err := xdb.InsertMany[kv3](nil, rows).OnConflict(k).DoUpdateSet(v.To(7)).SQL(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(args) > d.MaxParams() {
+			t.Errorf("[%s] %d params exceed limit %d", d.Name(), len(args), d.MaxParams())
+		}
+		// 没有冲突子句时仍按满额分批。
+		_, args, _ = xdb.InsertMany[kv3](nil, rows).SQL(d)
+		if len(args) != 65535 {
+			t.Errorf("[%s] plain insert chunk = %d params, want 65535", d.Name(), len(args))
+		}
+	}
+}

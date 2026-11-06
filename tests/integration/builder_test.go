@@ -846,3 +846,34 @@ func TestBuilderLocks(t *testing.T) {
 		}
 	})
 }
+
+type BulkKV struct {
+	K int64 `xdb:"k,pk"`
+	V int64 `xdb:"v"`
+	W int64 `xdb:"w"`
+}
+
+func (BulkKV) TableName() string { return "bulk_kv" }
+
+// 满额分批 + 冲突子句自带参数：曾因超过 65535 个占位符被两种数据库拒绝。
+func TestBuilderBulkUpsertParamLimit(t *testing.T) {
+	forEachDB(t, func(t *testing.T, db *xdb.DB) {
+		mustExec(t, db, "DROP TABLE IF EXISTS bulk_kv")
+		mustExec(t, db, "CREATE TABLE bulk_kv (k BIGINT PRIMARY KEY, v BIGINT NOT NULL, w BIGINT NOT NULL)")
+		rows := make([]BulkKV, 21845)
+		for i := range rows {
+			rows[i].K = int64(i + 1)
+		}
+		tb := xdb.TableOf[BulkKV]()
+		k, v := xdb.CNum[int64](tb, "k"), xdb.CNum[int64](tb, "v")
+		for round := range 2 { // 第二轮全部走冲突更新
+			if _, err := xdb.InsertMany[BulkKV](db, rows).OnConflict(k).DoUpdateSet(v.To(7)).Exec(ctx); err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		n, err := xdb.Query[BulkKV](db).Where(v.Eq(7)).Count(ctx)
+		if err != nil || n != int64(len(rows)) {
+			t.Fatalf("updated rows: %d %v", n, err)
+		}
+	})
+}

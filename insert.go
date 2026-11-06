@@ -239,8 +239,16 @@ func (q *InsertQ[T]) now() time.Time {
 	return time.Now()
 }
 
-func (q *InsertQ[T]) chunkSize(d dialect.Dialect, ncols int) int {
-	n := max(d.MaxParams()/ncols, 1)
+// chunkSize 计算每条语句的行数：VALUES 的参数加上冲突子句自带的参数
+// （如 DoUpdateSet(col.To(v)) 绑定的 v）不能超过方言上限。
+func (q *InsertQ[T]) chunkSize(d dialect.Dialect, fields []*schema.Field) int {
+	budget := d.MaxParams()
+	if q.conflict != nil {
+		b := newBuilder(d)
+		q.buildConflict(b, fields)
+		budget -= len(b.args)
+	}
+	n := max(budget/len(fields), 1)
 	if q.batch > 0 {
 		n = min(n, q.batch)
 	}
@@ -256,7 +264,7 @@ func (q *InsertQ[T]) SQL(d dialect.Dialect) (string, []any, error) {
 	if len(q.rows) == 0 {
 		return "", nil, errors.New("xdb: INSERT has no rows")
 	}
-	n := min(len(q.rows), q.chunkSize(d, len(fields)))
+	n := min(len(q.rows), q.chunkSize(d, fields))
 	return q.render(d, fields, q.rows[:n], q.returning(d, backfill))
 }
 
@@ -423,7 +431,7 @@ func (q *InsertQ[T]) Exec(ctx context.Context) (int64, error) {
 	q.stampTimes(fields, q.now())
 	d := q.ex.Dialect()
 	ret := q.returning(d, backfill)
-	size := q.chunkSize(d, len(fields))
+	size := q.chunkSize(d, fields)
 	var total int64
 	for start := 0; start < len(q.rows); start += size {
 		chunk := q.rows[start:min(start+size, len(q.rows))]

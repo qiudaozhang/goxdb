@@ -110,8 +110,15 @@ func (q *Q[T]) preloadOne(ctx context.Context, m *schema.Model, rel *schema.Rela
 		return nil
 	}
 
-	// 分批查询子表，避免超出方言参数上限。
-	limit := max(q.ex.Dialect().MaxParams()-len(conds)-8, 1)
+	// 分批查询子表，避免超出方言参数上限。附加条件绑定的参数个数不等于条件个数
+	// （一个 In(...) 就可能绑定成百上千个值），这里按实际渲染结果扣除。
+	reserved := 0
+	if extra := And(conds...); !extra.IsZero() {
+		cb := newBuilder(q.ex.Dialect())
+		extra.build(cb)
+		reserved = len(cb.args)
+	}
+	limit := max(q.ex.Dialect().MaxParams()-reserved, 1)
 	byKey := make(map[string][]reflect.Value, len(keys))
 	for start := 0; start < len(keys); start += limit {
 		chunk := keys[start:min(start+limit, len(keys))]

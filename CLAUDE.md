@@ -62,9 +62,9 @@ cd benchmark && go test -bench . -benchmem            # 独立 module，与 sqlx
 | 文件 | 注意事项 |
 |---|---|
 | `internal/codegen/codegen.go` | 列集**必须与 `schema.walk` 同规则**：导出字段无标签也是列（`xdb:"-"` 排除）、嵌入字段递归展开、同名列层级最浅者胜、同层时显式列名唯一者胜否则全丢、跳过未导出嵌入指针；非结构体 / 带 `Scan` 方法的结构体 / `time.Time` / `sql.Null*` / 标签写了列名的嵌入算一列（`pkgIndex.classify`）；外部包结构体嵌入无法解析 → 警告且不生成扫描器。列类型的包限定符经 `typeImports` 映射到 import。`parity_test.go` 编译生成代码并断言运行时列集被生成扫描器接受——改规则时先跑它。描述符变量名冲突时回退 `<Type>Table`（`varNames`） |
-| `preload.go` | 关联键经 `relKey` 归一化（解引用指针、展开 `driver.Valuer`）；子表软删除过滤跟随主查询的 `Unscoped()` |
+| `preload.go` | 关联键经 `relKey` 归一化（解引用指针、展开 `driver.Valuer`）；子表软删除过滤跟随主查询的 `Unscoped()`；分批时按附加条件**实际绑定的参数个数**扣预算 |
 | `update.go` | 软删除 DELETE 渲染为 `UPDATE ... WHERE <col> IS NULL AND ...`，重复删除影响 0 行；带 Join 时与 `UpdateQ.Join` 共用 `buildUpdateTarget` / `buildUpdateJoinFrom` |
-| `insert.go` / `internal/scan` / `scanhook.go` | 写入嵌入字段前用 `schema.AllocEmbedded(v, m.EmbedPtrs)` 分配 nil 嵌入指针；新增写字段的路径要照做 |
+| `insert.go` / `internal/scan` / `scanhook.go` | `chunkSize` 要扣除冲突子句（`DoUpdateSet` 等）绑定的参数，否则满额批次超过 65535；写入嵌入字段前用 `schema.AllocEmbedded(v, m.EmbedPtrs)` 分配 nil 嵌入指针；新增写字段的路径要照做 |
 | `dialect/*/introspect.go` | 类型映射以「驱动真能扫进去」为准：`TIME`/`YEAR`/`money`/`timetz`/`interval` 等不映射为 `time.Time` 或浮点。新增映射时扩充集成测试 `TestReverseTypesScan` |
 | `benchmark/` | 灌数与每个场景清理后都要 `analyzeTables`：MySQL 统计信息过期会让计划慢 3 倍且随机落在某个框架上 |
 

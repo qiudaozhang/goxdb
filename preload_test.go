@@ -121,3 +121,31 @@ func TestPreloadSoftDeletedChildren(t *testing.T) {
 		t.Fatalf("got %q", log)
 	}
 }
+
+// 预加载分批时要扣除附加条件实际绑定的参数：一个 In(...) 可以绑定上百个值。
+func TestPreloadChunkReservesConditionParams(t *testing.T) {
+	const parents = 65535
+	maxArgs := 0
+	db, _ := newDB(t, func(q string, args []any) (*fakedb.Result, error) {
+		if strings.Contains(q, `FROM "authors"`) {
+			maxArgs = max(maxArgs, len(args))
+			return &fakedb.Result{Columns: []string{"id", "name"}}, nil
+		}
+		rows := make([][]any, parents)
+		for i := range rows {
+			rows[i] = []any{int64(i + 1), int64(i + 1)}
+		}
+		return &fakedb.Result{Columns: []string{"id", "author_id"}, Rows: rows}, nil
+	})
+	allowed := make([]int64, 100)
+	for i := range allowed {
+		allowed[i] = int64(i + 1)
+	}
+	cond := xdb.C[int64](xdb.T("authors"), "id").In(allowed...)
+	if _, err := xdb.Query[plBook](db).Preload("Author", cond).All(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if limit := db.Dialect().MaxParams(); maxArgs == 0 || maxArgs > limit {
+		t.Fatalf("largest preload statement bound %d params (limit %d)", maxArgs, limit)
+	}
+}
