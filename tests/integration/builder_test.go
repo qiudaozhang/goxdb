@@ -584,11 +584,13 @@ func TestBuilderCallbacks(t *testing.T) {
 }
 
 type RankedOrder struct {
-	ID         int64 `xdb:"id"`
-	CustomerID int64 `xdb:"customer_id"`
-	Amount     int64 `xdb:"amount"`
-	RN         int64 `xdb:"rn"`
-	Running    int64 `xdb:"running"`
+	ID         int64  `xdb:"id"`
+	CustomerID int64  `xdb:"customer_id"`
+	Amount     int64  `xdb:"amount"`
+	RN         int64  `xdb:"rn"`
+	Running    int64  `xdb:"running"`
+	Second     *int64 `xdb:"second"`
+	Prev       *int64 `xdb:"prev"`
 }
 
 func TestBuilderWindowFunctions(t *testing.T) {
@@ -620,6 +622,22 @@ func TestBuilderWindowFunctions(t *testing.T) {
 		}
 		if running[0].Running != 100 || running[1].Running != 150 || running[2].Running != 160 {
 			t.Fatalf("running sum: %+v", running)
+		}
+
+		// NTH_VALUE / LAG 在默认框架下首行为 NULL，必须能扫进 *int64
+		nth, err := xdb.Select[RankedOrder](db,
+			O.Amount,
+			xdb.NthValue[int64](O.Amount, 2).Over(w).As("second"),
+			xdb.Lag[int64](O.Amount, 0).Over(w).As("prev"),
+		).From(O).Where(O.CustomerID.Eq(1)).OrderBy(O.Amount.Desc()).All(ctx)
+		if err != nil || len(nth) != 3 {
+			t.Fatalf("%+v %v", nth, err)
+		}
+		if nth[0].Second != nil || nth[1].Second == nil || *nth[1].Second != 50 || *nth[2].Second != 50 {
+			t.Fatalf("nth_value: %+v", nth)
+		}
+		if nth[0].Prev != nil || nth[1].Prev == nil || *nth[1].Prev != 100 {
+			t.Fatalf("lag: %+v", nth)
 		}
 
 		// 派生表外层过滤 rn = 1：每个客户的最大订单

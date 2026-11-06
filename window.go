@@ -1,12 +1,15 @@
 package xdb
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 // 窗口函数（M3）。
 //
 // 用法：构造一个窗口函数，用 Over 指定分区与排序，再 As 起别名放进投影：
 //
-//	rowNum := xdb.RowNumber().Over(xdb.Window().PartitionBy(O.CustomerID).OrderBy(O.Amount.Desc()))
+//	rowNum := xdb.RowNumber().Over(xdb.Win().PartitionBy(O.CustomerID).OrderBy(O.Amount.Desc()))
 //	rows, err := xdb.Select[RankedOrder](db, O.ID, O.Amount, rowNum.As("rn")).From(O).All(ctx)
 //
 // 窗口函数只能出现在 SELECT 列表与 ORDER BY 中，不能用于 WHERE / HAVING
@@ -71,107 +74,136 @@ func (w Window) build(b *builder) {
 	b.write(")")
 }
 
-// windowFunc 是「函数名 + 参数 + 窗口」的通用节点。
-type windowFunc[T any] struct {
+// WindowFunc 是「函数名 + 参数 + 窗口」的通用节点，T 是结果列的 Go 类型。
+//
+// 它本身就是 Expr[T]（未调用 Over 时渲染为 OVER ()），导出是为了让调用方
+// 能把窗口函数存进变量、字段或作为参数传递，例如：
+//
+//	var rank xdb.WindowFunc[int64] = xdb.Rank()
+type WindowFunc[T any] struct {
 	name string
 	args []Node
 	win  Window
+	err  error // 构造期参数错误，渲染时报告
 }
 
-func (n windowFunc[T]) build(b *builder) {
+func (n WindowFunc[T]) build(b *builder) {
+	if n.err != nil {
+		b.fail(n.err)
+		return
+	}
 	b.write(n.name + "(")
 	b.nodes(n.args, ", ")
 	b.write(") ")
 	n.win.build(b)
 }
 
-func (n windowFunc[T]) exprType() T { var z T; return z }
+func (n WindowFunc[T]) exprType() T { var z T; return z }
 
 // Over 设置窗口，返回可用于投影的表达式。
-func (n windowFunc[T]) Over(w Window) E[T] { n.win = w; return wrap[T](n) }
+func (n WindowFunc[T]) Over(w Window) E[T] { n.win = w; return wrap[T](n) }
 
 // OverExpr 直接返回表达式（等价于 Over），便于链式书写。
-func (n windowFunc[T]) OverExpr(w Window) E[T] { return n.Over(w) }
+func (n WindowFunc[T]) OverExpr(w Window) E[T] { return n.Over(w) }
+
+// intArg 渲染正整数字面量参数；min 以下的值记为构造期错误。
+func intArg(fn string, v, min int) (Node, error) {
+	if v < min {
+		return nil, fmt.Errorf("xdb: %s argument must be >= %d, got %d", fn, min, v)
+	}
+	return rawNode(strconv.Itoa(v)), nil
+}
 
 // ---------- 排名函数 ----------
 
 // RowNumber 即 ROW_NUMBER()：分区内从 1 开始连续编号，不并列。
-func RowNumber() windowFunc[int64] { return windowFunc[int64]{name: "ROW_NUMBER"} }
+func RowNumber() WindowFunc[int64] { return WindowFunc[int64]{name: "ROW_NUMBER"} }
 
 // Rank 即 RANK()：并列时名次相同，随后跳号。
-func Rank() windowFunc[int64] { return windowFunc[int64]{name: "RANK"} }
+func Rank() WindowFunc[int64] { return WindowFunc[int64]{name: "RANK"} }
 
 // DenseRank 即 DENSE_RANK()：并列时名次相同，后续不跳号。
-func DenseRank() windowFunc[int64] { return windowFunc[int64]{name: "DENSE_RANK"} }
+func DenseRank() WindowFunc[int64] { return WindowFunc[int64]{name: "DENSE_RANK"} }
 
 // PercentRank 即 PERCENT_RANK()。
-func PercentRank() windowFunc[float64] { return windowFunc[float64]{name: "PERCENT_RANK"} }
+func PercentRank() WindowFunc[float64] { return WindowFunc[float64]{name: "PERCENT_RANK"} }
 
 // CumeDist 即 CUME_DIST()。
-func CumeDist() windowFunc[float64] { return windowFunc[float64]{name: "CUME_DIST"} }
+func CumeDist() WindowFunc[float64] { return WindowFunc[float64]{name: "CUME_DIST"} }
 
 // Ntile 即 NTILE(n)：把分区划分为 n 组。
-func Ntile(n int) windowFunc[int64] {
-	return windowFunc[int64]{name: "NTILE", args: []Node{rawNode(strconv.Itoa(n))}}
+// n 必须 >= 1，否则渲染时报错。
+func Ntile(n int) WindowFunc[int64] {
+	a, err := intArg("NTILE", n, 1)
+	return WindowFunc[int64]{name: "NTILE", args: []Node{a}, err: err}
 }
 
 // Lag 即 LAG(expr, offset)：取分区内前 offset 行的值（默认 1）。
-func Lag[T any](x Expr[T], offset int) windowFunc[*T] {
+// offset 为 0 时省略（数据库默认 1）；负数在渲染时报错。
+// 结果是 *T：越过分区边界的行得到 NULL。
+func Lag[T any](x Expr[T], offset int) WindowFunc[*T] {
 	args := []Node{x}
-	if offset > 0 {
-		args = append(args, rawNode(strconv.Itoa(offset)))
+	if offset == 0 {
+		return WindowFunc[*T]{name: "LAG", args: args}
 	}
-	return windowFunc[*T]{name: "LAG", args: args}
+	a, err := intArg("LAG", offset, 1)
+	return WindowFunc[*T]{name: "LAG", args: append(args, a), err: err}
 }
 
 // Lead 即 LEAD(expr, offset)：取分区内后 offset 行的值（默认 1）。
-func Lead[T any](x Expr[T], offset int) windowFunc[*T] {
+// offset 为 0 时省略（数据库默认 1）；负数在渲染时报错。
+// 结果是 *T：越过分区边界的行得到 NULL。
+func Lead[T any](x Expr[T], offset int) WindowFunc[*T] {
 	args := []Node{x}
-	if offset > 0 {
-		args = append(args, rawNode(strconv.Itoa(offset)))
+	if offset == 0 {
+		return WindowFunc[*T]{name: "LEAD", args: args}
 	}
-	return windowFunc[*T]{name: "LEAD", args: args}
+	a, err := intArg("LEAD", offset, 1)
+	return WindowFunc[*T]{name: "LEAD", args: append(args, a), err: err}
 }
 
 // FirstValue 即 FIRST_VALUE(expr)。
-func FirstValue[T any](x Expr[T]) windowFunc[T] {
-	return windowFunc[T]{name: "FIRST_VALUE", args: []Node{x}}
+func FirstValue[T any](x Expr[T]) WindowFunc[T] {
+	return WindowFunc[T]{name: "FIRST_VALUE", args: []Node{x}}
 }
 
 // LastValue 即 LAST_VALUE(expr)。注意默认框架下它等于当前行，
 // 通常需要配合 Frame("ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING")。
-func LastValue[T any](x Expr[T]) windowFunc[T] {
-	return windowFunc[T]{name: "LAST_VALUE", args: []Node{x}}
+func LastValue[T any](x Expr[T]) WindowFunc[T] {
+	return WindowFunc[T]{name: "LAST_VALUE", args: []Node{x}}
 }
 
-// NthValue 即 NTH_VALUE(expr, n)。
-func NthValue[T any](x Expr[T], n int) windowFunc[T] {
-	return windowFunc[T]{name: "NTH_VALUE", args: []Node{x, rawNode(strconv.Itoa(n))}}
+// NthValue 即 NTH_VALUE(expr, n)，n 从 1 开始。
+//
+// 结果是 *T：默认框架（到当前行为止）下，分区前 n-1 行还看不到第 n 行，值为 NULL。
+func NthValue[T any](x Expr[T], n int) WindowFunc[*T] {
+	a, err := intArg("NTH_VALUE", n, 1)
+	return WindowFunc[*T]{name: "NTH_VALUE", args: []Node{x, a}, err: err}
 }
 
 // ---------- 聚合窗口函数 ----------
 
 // SumOver 即 SUM(expr) OVER (...)。
-func SumOver[T any](x Expr[T]) windowFunc[T] {
-	return windowFunc[T]{name: "SUM", args: []Node{x}}
+func SumOver[T any](x Expr[T]) WindowFunc[T] {
+	return WindowFunc[T]{name: "SUM", args: []Node{x}}
 }
 
 // CountOver 即 COUNT(expr) OVER (...)。
-func CountOver(x Node) windowFunc[int64] {
-	return windowFunc[int64]{name: "COUNT", args: []Node{x}}
+func CountOver(x Node) WindowFunc[int64] {
+	return WindowFunc[int64]{name: "COUNT", args: []Node{x}}
 }
 
 // AvgOver 即 AVG(expr) OVER (...)。
-func AvgOver[T any](x Expr[T]) windowFunc[float64] {
-	return windowFunc[float64]{name: "AVG", args: []Node{x}}
+func AvgOver[T any](x Expr[T]) WindowFunc[float64] {
+	return WindowFunc[float64]{name: "AVG", args: []Node{x}}
 }
 
 // MinOver 即 MIN(expr) OVER (...)。
-func MinOver[T any](x Expr[T]) windowFunc[T] {
-	return windowFunc[T]{name: "MIN", args: []Node{x}}
+func MinOver[T any](x Expr[T]) WindowFunc[T] {
+	return WindowFunc[T]{name: "MIN", args: []Node{x}}
 }
 
 // MaxOver 即 MAX(expr) OVER (...)。
-func MaxOver[T any](x Expr[T]) windowFunc[T] {
-	return windowFunc[T]{name: "MAX", args: []Node{x}}
+func MaxOver[T any](x Expr[T]) WindowFunc[T] {
+	return WindowFunc[T]{name: "MAX", args: []Node{x}}
 }

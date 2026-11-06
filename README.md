@@ -331,6 +331,9 @@ top, err := xdb.Select[RankedOrder](db, d.Star()).From(d).Where(xdb.C[int64](d, 
 
 可用：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead /
 FirstValue / LastValue / NthValue`，窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。
+构造函数返回 `xdb.WindowFunc[T]`，可以存进变量或作参数传递。`Lag / Lead / NthValue` 的结果类型是 `*T`：
+越过分区边界的行、或默认框架下还看不到第 n 行时值为 NULL。`Ntile(n)`、`NthValue(x, n)` 要求 `n >= 1`，
+`Lag / Lead` 的 offset 不能为负（0 表示省略，用数据库默认的 1），非法值在渲染时返回错误。
 
 ### 方言专属能力
 

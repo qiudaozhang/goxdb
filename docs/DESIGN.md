@@ -635,7 +635,7 @@ DB / Executor / Raw / All·One·Iter·Scan / 结构体扫描 / Hook / 错误归�
 
 ### M3（进行中）
 
-- **窗口函数**：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead / FirstValue / LastValue / NthValue`，以及窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。窗口用 `xdb.Win().PartitionBy(...).OrderBy(...).Frame(...)` 描述；框架语法在 MySQL 8 与 PostgreSQL 之间一致，故不作方言翻译。窗口函数只能出现在投影与 ORDER BY 中，过滤需用派生表包一层（测试里覆盖了「每个客户金额最大的订单」这一典型写法）。
+- **窗口函数**：`RowNumber / Rank / DenseRank / PercentRank / CumeDist / Ntile / Lag / Lead / FirstValue / LastValue / NthValue`，以及窗口版聚合 `SumOver / CountOver / AvgOver / MinOver / MaxOver`。构造函数返回导出类型 `WindowFunc[T]`；可能产出 NULL 的 `Lag / Lead / NthValue` 结果类型为 `*T`，整数参数在构建期校验。窗口用 `xdb.Win().PartitionBy(...).OrderBy(...).Frame(...)` 描述；框架语法在 MySQL 8 与 PostgreSQL 之间一致，故不作方言翻译。窗口函数只能出现在投影与 ORDER BY 中，过滤需用派生表包一层（测试里覆盖了「每个客户金额最大的订单」这一典型写法）。
 - **软删除**：字段加 `xdb:"deleted_at,softDelete"` 后，`Query / Select / 子查询`自动附加 `<col> IS NULL`，`Delete` 渲染为 `UPDATE ... SET <col> = CURRENT_TIMESTAMP WHERE <col> IS NULL AND ...`（带 Join 时为多表 UPDATE；重复删除不覆盖首次删除时间）。Preload 的关联表、UNION 各分支同样过滤。`Unscoped()` 用于绕过过滤（查询）或真正物理删除（删除）。软删除列属于**源表**，因此从 `from` 的模型推导而非结果类型——`xdb.Select[int64](nil, P.ID).From(P)` 也能正确过滤；手写的 `xdb.T("posts")` 没有模型信息，不会自动过滤（行为显式）。
 - **方言扩展包**：`dialect/pg`（JSONB 路径 `->` / `->>`、`@>`、`jsonb_exists`、数组 `ANY / @> / && / array_length`）与 `dialect/my`（`JSON_EXTRACT` / `JSON_UNQUOTE` / `JSON_CONTAINS_PATH` / `JSON_CONTAINS`、`MATCH ... AGAINST`）。放在子包里，用户显式 import，**不污染通用 API**——用了方言专属特性在 import 上一眼可见。
   - MySQL 的 `??` 占位符转义对 `?` 操作符不友好，因此 `HasKey` 改用等价的 `jsonb_exists()` 函数。

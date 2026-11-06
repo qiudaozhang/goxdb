@@ -72,3 +72,56 @@ func TestWindowFilterViaDerived(t *testing.T) {
 		`SELECT "r".* FROM (SELECT "orders"."id", "orders"."customer_id", "orders"."amount", ROW_NUMBER() OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."amount" DESC) AS "rn" FROM "orders") AS "r" WHERE "r"."rn" = $1`,
 		int64(1))
 }
+
+// 尚未覆盖的窗口函数逐一渲染。
+func TestWindowRemainingFunctions(t *testing.T) {
+	w := xdb.Win().PartitionBy(O.CustomerID).OrderBy(O.ID.Asc())
+	all := xdb.Win().PartitionBy(O.CustomerID).OrderBy(O.ID.Asc()).
+		Frame("ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING")
+	cases := []struct {
+		n      xdb.Node
+		my, pg string
+	}{
+		{xdb.PercentRank().Over(w), "PERCENT_RANK() OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id`)", `PERCENT_RANK() OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id")`},
+		{xdb.CumeDist().Over(w), "CUME_DIST() OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id`)", `CUME_DIST() OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id")`},
+		{xdb.Lead[int64](O.Amount, 0).Over(w), "LEAD(`orders`.`amount`) OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id`)", `LEAD("orders"."amount") OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id")`},
+		{xdb.Lead[int64](O.Amount, 2).Over(w), "LEAD(`orders`.`amount`, 2) OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id`)", `LEAD("orders"."amount", 2) OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id")`},
+		{xdb.FirstValue[int64](O.Amount).Over(w), "FIRST_VALUE(`orders`.`amount`) OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id`)", `FIRST_VALUE("orders"."amount") OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id")`},
+		{xdb.LastValue[int64](O.Amount).Over(all), "LAST_VALUE(`orders`.`amount`) OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id` ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", `LAST_VALUE("orders"."amount") OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`},
+		{xdb.NthValue[int64](O.Amount, 2).Over(w), "NTH_VALUE(`orders`.`amount`, 2) OVER (PARTITION BY `orders`.`customer_id` ORDER BY `orders`.`id`)", `NTH_VALUE("orders"."amount", 2) OVER (PARTITION BY "orders"."customer_id" ORDER BY "orders"."id")`},
+		{xdb.CountOver(O.ID).Over(xdb.Win().PartitionBy(O.CustomerID)), "COUNT(`orders`.`id`) OVER (PARTITION BY `orders`.`customer_id`)", `COUNT("orders"."id") OVER (PARTITION BY "orders"."customer_id")`},
+		{xdb.AvgOver[int64](O.Amount).Over(xdb.Win()), "AVG(`orders`.`amount`) OVER ()", `AVG("orders"."amount") OVER ()`},
+		{xdb.MinOver[int64](O.Amount).Over(xdb.Win()), "MIN(`orders`.`amount`) OVER ()", `MIN("orders"."amount") OVER ()`},
+		{xdb.MaxOver[int64](O.Amount).Over(xdb.Win()), "MAX(`orders`.`amount`) OVER ()", `MAX("orders"."amount") OVER ()`},
+	}
+	for _, c := range cases {
+		golden(t, xdb.Select[RankedOrder](nil, c.n).From(O),
+			"SELECT "+c.my+" FROM `orders`",
+			`SELECT `+c.pg+` FROM "orders"`)
+	}
+}
+
+// 导出类型：窗口函数可以存进变量/字段；未调用 Over 时渲染为 OVER ()。
+func TestWindowFuncExportedType(t *testing.T) {
+	var rank xdb.WindowFunc[int64] = xdb.Rank()
+	var nth xdb.WindowFunc[*int64] = xdb.NthValue[int64](O.Amount, 2) // 可能为 NULL
+	_ = nth
+	golden(t, xdb.Select[RankedOrder](nil, rank).From(O),
+		"SELECT RANK() OVER () FROM `orders`",
+		`SELECT RANK() OVER () FROM "orders"`)
+}
+
+// 非法的整数参数不会渲染出数据库才报错的 SQL，而是在构建期返回错误。
+func TestWindowInvalidArgs(t *testing.T) {
+	for name, n := range map[string]xdb.Node{
+		"ntile0":   xdb.Ntile(0).Over(xdb.Win()),
+		"nth0":     xdb.NthValue[int64](O.Amount, 0).Over(xdb.Win()),
+		"lagNeg":   xdb.Lag[int64](O.Amount, -1).Over(xdb.Win()),
+		"leadNeg":  xdb.Lead[int64](O.Amount, -2).Over(xdb.Win()),
+		"noOverNt": xdb.Ntile(-3),
+	} {
+		if err := renderErr(xdb.Select[RankedOrder](nil, n).From(O)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
